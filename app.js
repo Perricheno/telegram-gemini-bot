@@ -1,78 +1,84 @@
 // app.js
 
-// Load environment variables from .env file (for local development).
+// Загружаем переменные окружения из .env файла.
+// Эта строка должна быть самой первой в файле, чтобы переменные были доступны сразу.
 require('dotenv').config();
 
-// Import necessary libraries
+// --- Импорт необходимых библиотек ---
 const { Telegraf, session } = require('telegraf');
 const express = require('express');
-const axios = require('axios'); // For downloading files from Telegram
+const axios = require('axios'); // Используется для скачивания файлов из Telegram
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require('@google/generative-ai');
 
-// Get tokens from environment variables
+// --- Инициализация API ключей и клиентов ---
+// Получаем токен Telegram бота из переменной окружения
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+// Получаем API ключ Gemini из переменной окружения
 const geminiApiKey = process.env.GEMINI_API_KEY;
 
-// Check if tokens are set
+// Проверка, установлены ли необходимые токены/ключи
 if (!telegramToken) {
-    console.error('Error: TELEGRAM_BOT_TOKEN environment variable is not set.');
-    process.exit(1);
+    console.error('Ошибка: Переменная окружения TELEGRAM_BOT_TOKEN не установлена.');
+    process.exit(1); // Завершаем процесс, если токен Telegram отсутствует
 }
 if (!geminiApiKey) {
-    console.error('Error: GEMINI_API_KEY environment variable is not set.');
-    console.error('Please set GEMINI_API_KEY in your Render environment variables or in the local .env file.');
-    process.exit(1);
+    console.error('Ошибка: Переменная окружения GEMINI_API_KEY не установлена.');
+    console.error('Пожалуйста, установите GEMINI_API_KEY в переменных окружения Render или в локальном файле .env');
+    process.exit(1); // Завершаем процесс, если ключ Gemini отсутствует
 }
 
-// Initialize Telegraf bot
+// Инициализируем экземпляр бота Telegraf
 const bot = new Telegraf(telegramToken);
 
-// Initialize Google Generative AI client
+// Инициализируем клиент Google Generative AI
 const genAI = new GoogleGenerativeAI(geminiApiKey);
-// Get the FileService client for uploading files
-const fileService = genAI.getGenerativeModel('').getFileService(); // File Service doesn't require a specific model instance
+// Получаем клиент FileService для работы с Gemini File API (загрузка файлов)
+const fileService = genAI.getGenerativeModel('').getFileService(); // File Service не требует указания конкретной модели
 
-// --- Session Management ---
-// Use in-memory session for simplicity. For production, use persistent storage!
-// https://telegraf.js.org/#/middlewares?id=session
+// --- Управление сессиями Telegraf ---
+// Используем встроенное в Telegraf управление сессиями.
+// В данном примере используется in-memory хранилище, что удобно для быстрой разработки.
+// Для продакшена РЕКОМЕНДУЕТСЯ использовать ПЕРСИСТЕНТНОЕ хранилище (например, Redis, MongoDB),
+// чтобы данные сессий (история чата, настройки) сохранялись между перезапусками бота.
 bot.use(session({ property: 'session' }));
 
-// Middleware to initialize session defaults if not present
+// Middleware для инициализации значений сессии по умолчанию, если они отсутствуют
 bot.use((ctx, next) => {
+    // Проверяем, что сессия существует и является объектом (или инициализируем ее)
     if (!ctx.session || typeof ctx.session !== 'object') {
         ctx.session = {
-            history: [],
-            systemInstruction: null,
-            model: 'gemini-1.5-pro-latest', // Default to Pro for better multimodal support
+            history: [], // История диалога с Gemini
+            systemInstruction: null, // Системные инструкции для Gemini
+            model: 'gemini-1.5-pro-latest', // Модель Gemini по умолчанию (Pro-версии лучше для мультимодальности)
             tools: {
-                urlContext: false,
-                googleSearch: true, // Grounding (Google Search) is enabled by default
+                urlContext: false, // Флаг для инструмента URL Context (может быть устаревшим/специфичным)
+                googleSearch: true, // Флаг для инструмента Заземления (Google Search), включен по умолчанию
             },
-            talkMode: true, // Interpretation of Thinking Mode (toggles "Thinking..." message)
-            totalTokens: 0, // Token counter
-            lastMessageTime: Date.now(), // To track session activity if needed
+            talkMode: true, // Флаг для режима "Думаю..."
+            totalTokens: 0, // Счетчик использованных токенов
+            lastMessageTime: Date.now(), // Время последнего сообщения для отслеживания активности
         };
         console.log(`Session initialized for user ${ctx.from.id}`);
     }
-     // Update last message time for potential inactivity tracking
-     ctx.session.lastMessageTime = Date.now();
-    next();
+    // Обновляем время последнего сообщения при каждом взаимодействии
+    ctx.session.lastMessageTime = Date.now();
+    next(); // Передаем управление следующему middleware
 });
 
-// --- Gemini Model Configuration ---
-// Added notes on capabilities
+// --- Конфигурация моделей Gemini ---
+// Список доступных моделей Gemini с примечаниями об их возможностях
 const AVAILABLE_MODELS = {
-    'flash-04-17': 'gemini-2.5-flash-preview-04-17', // Preview, good for basic multimodal
-    'flash-05-20': 'gemini-2.5-flash-preview-05-20', // Preview, good for basic multimodal
-    'pro-05-06': 'gemini-2.5-pro-preview-05-06',   // Preview, likely strong multimodal (File API support probable)
-    'flash-2.0': 'gemini-2.0-flash',              // Older, multimodal support less certain/robust for complex files
-    'flash-lite-2.0': 'gemini-2.0-flash-lite',    // Older, likely limited multimodal
-    'image-gen-2.0': 'gemini-2.0-flash-preview-image-generation', // Warning: Image generation ONLY, not chat
-    'flash-latest': 'gemini-1.5-flash-latest',    // Stable, good for images+text
-    'pro-latest': 'gemini-1.5-pro-latest'         // Stable, BEST for PDF, long video/audio via File API
+    'flash-04-17': 'gemini-2.5-flash-preview-04-17', // Preview, хорошо для базовой мультимодальности
+    'flash-05-20': 'gemini-2.5-flash-preview-05-20', // Preview, хорошо для базовой мультимодальности
+    'pro-05-06': 'gemini-2.5-pro-preview-05-06',   // Preview, вероятно, сильная мультимодальность (поддержка File API)
+    'flash-2.0': 'gemini-2.0-flash',              // Старее, поддержка мультимодальности менее надежна для сложных файлов
+    'flash-lite-2.0': 'gemini-2.0-flash-lite',    // Старее, вероятно, ограниченная мультимодальность
+    'image-gen-2.0': 'gemini-2.0-flash-preview-image-generation', // ВНИМАНИЕ: ТОЛЬКО для генерации изображений, не для чата
+    'flash-latest': 'gemini-1.5-flash-latest',    // Стабильная, хороша для изображений + текста
+    'pro-latest': 'gemini-1.5-pro-latest'         // Стабильная, ЛУЧШЕ всего для PDF, длинного видео/аудио через File API
 };
 
-// Map user-friendly names to API names
+// Псевдонимы для моделей, чтобы пользователям было удобнее их выбирать
 const MODEL_ALIASES = {
     '04-17': 'flash-04-17',
     '05-20': 'flash-05-20',
@@ -82,33 +88,41 @@ const MODEL_ALIASES = {
     'image-gen': 'image-gen-2.0',
     'latest-flash': 'flash-latest',
     'latest-pro': 'pro-latest',
-    'default': 'pro-latest', // Default to Pro for better file support
-     'flash1.5': 'flash-latest',
-     'pro1.5': 'pro-latest',
-     'flash2.5': 'flash-05-20', // Alias for latest 2.5 Flash preview
-     'pro2.5': 'pro-05-06' // Alias for latest 2.5 Pro preview
+    'default': 'pro-latest', // Модель по умолчанию для удобства
+    'flash1.5': 'flash-latest',
+    'pro1.5': 'pro-latest',
+    'flash2.5': 'flash-05-20', // Псевдоним для последней 2.5 Flash preview
+    'pro2.5': 'pro-05-06' // Псевдоним для последней 2.5 Pro preview
 };
 
+// --- Вспомогательные функции для работы с файлами ---
 
-// --- Helper Functions ---
-
-// Function to download a file from Telegram as a Buffer
+/**
+ * Скачивает файл из Telegram по fileId и возвращает его как Buffer.
+ * @param {string} fileId - ID файла в Telegram.
+ * @returns {Promise<Buffer|null>} Буфер с данными файла или null в случае ошибки.
+ */
 async function downloadFileBuffer(fileId) {
     try {
-        const fileUrl = await bot.telegram.getFileLink(fileId);
+        const fileUrl = await bot.telegram.getFileLink(fileId); // Получаем прямую ссылку на файл
         const response = await axios({
             url: fileUrl.href,
             method: 'GET',
-            responseType: 'arraybuffer' // Get data as ArrayBuffer
+            responseType: 'arraybuffer' // Получаем данные как ArrayBuffer
         });
-        return Buffer.from(response.data);
+        return Buffer.from(response.data); // Конвертируем ArrayBuffer в Node.js Buffer
     } catch (error) {
         console.error(`Error downloading file (ID: ${fileId}):`, error);
         return null;
     }
 }
 
-// Function to download an image file from Telegram as Base64 (for inline_data)
+/**
+ * Скачивает файл из Telegram по fileId и возвращает его Base64 представление с определением mime-типа.
+ * Используется в основном для inline_data (изображений).
+ * @param {string} fileId - ID файла в Telegram.
+ * @returns {Promise<{data: string, mimeType: string}|null>} Объект с Base64 данными и mime-типом, или null.
+ */
 async function downloadFileAsBase64(fileId) {
     try {
         const fileUrl = await bot.telegram.getFileLink(fileId);
@@ -119,18 +133,16 @@ async function downloadFileAsBase64(fileId) {
         });
 
         const buffer = Buffer.from(response.data);
-        // Basic mime type detection based on file signature (magic numbers).
-        // This is primarily for images for inline_data.
-        let mimeType = 'application/octet-stream';
+        let mimeType = 'application/octet-stream'; // Тип по умолчанию
+
+        // Базовое определение mime-типа по "магическим числам" (сигнатуре файла)
         if (buffer.length >= 4) {
              const signature = buffer.subarray(0, 4).toString('hex').toUpperCase();
              if (signature === '89504E47') mimeType = 'image/png'; // PNG
              else if (signature === '47494638') mimeType = 'image/gif'; // GIF
-             else if (signature.startsWith('FFD8FF')) mimeType = 'image/jpeg'; // JPEG (Common start)
+             else if (signature.startsWith('FFD8FF')) mimeType = 'image/jpeg'; // JPEG
              else if (signature.startsWith('52494646') && buffer.subarray(8, 12).toString('hex').toUpperCase() === '57454250') mimeType = 'image/webp'; // WebP
         }
-        // If Telegram provided a mime type for the photo, it's usually reliable too.
-        // For inline data, make sure the detected type is correct for Gemini.
 
         const base64 = buffer.toString('base64');
         return { data: base64, mimeType: mimeType };
@@ -140,8 +152,13 @@ async function downloadFileAsBase64(fileId) {
     }
 }
 
-
-// Function to upload a file buffer to Gemini File API
+/**
+ * Загружает буфер файла в Gemini File API.
+ * @param {Buffer} buffer - Буфер с данными файла.
+ * @param {string} mimeType - MIME-тип файла (например, 'application/pdf', 'video/mp4').
+ * @param {string} fileName - Имя файла для отображения.
+ * @returns {Promise<Object|null>} Объект файла от Gemini API (содержит 'name' - FID и 'uri'), или null.
+ */
 async function uploadFileToGemini(buffer, mimeType, fileName) {
     if (!buffer || !mimeType || !fileName) {
         console.error('Missing buffer, mimeType, or fileName for Gemini upload.');
@@ -151,12 +168,12 @@ async function uploadFileToGemini(buffer, mimeType, fileName) {
     try {
         const uploadResult = await fileService.uploadFile(buffer, {
              mimeType: mimeType,
-             displayName: fileName, // Optional display name
+             displayName: fileName, // Отображаемое имя в Gemini API
         });
 
-        const file = uploadResult.file; // Get the file object with FID and URI
-        console.log(`File uploaded to Gemini File API: Name=${file.name}, URI=${file.uri}`); // file.name is the FID
-        return file; // Return the file object
+        const file = uploadResult.file; // Объект файла, возвращаемый File API
+        console.log(`File uploaded to Gemini File API: Name=${file.name}, URI=${file.uri}`); // file.name это FID
+        return file; // Возвращаем объект файла
     } catch (error) {
         console.error(`Error uploading file "${fileName}" (${mimeType}) to Gemini File API:`, error);
          if (error.response && error.response.data) {
@@ -166,9 +183,12 @@ async function uploadFileToGemini(buffer, mimeType, fileName) {
     }
 }
 
-// Function to delete files from Gemini File API (important for managing storage)
-// It's good practice to delete files after they are no longer needed (e.g., after conversation ends or after a grace period)
-// For simplicity, not called automatically in this example, but keep in mind for production.
+/**
+ * Удаляет файл из Gemini File API.
+ * Важно для управления хранилищем, т.к. файлы хранятся до 48 часов.
+ * @param {string} fileUri - URI файла для удаления (например, 'files/some-fid').
+ * @returns {Promise<boolean>} True, если удаление успешно, false в противном случае.
+ */
 async function deleteGeminiFile(fileUri) {
     try {
         console.log(`Attempting to delete Gemini file: ${fileUri}`);
@@ -184,10 +204,9 @@ async function deleteGeminiFile(fileUri) {
     }
 }
 
+// --- Обработчики команд Telegram ---
 
-// --- Command Handlers ---
-
-// Start command - Welcome message
+// Команда /start - приветственное сообщение и список команд
 bot.start((ctx) => {
     ctx.reply('Привет! Я Telegram бот с интеграцией Gemini. Отправь мне текст или поддерживаемый файл (фото, PDF, видео, аудио) с текстом или без, и я отвечу. Используй команды для настройки:\n' +
               '/newchat - начать новый чат\n' +
@@ -200,7 +219,7 @@ bot.start((ctx) => {
               '/help - показать это сообщение еще раз');
 });
 
-// Help command - show commands
+// Команда /help - список всех доступных команд
 bot.help((ctx) => {
      const modelsList = Object.keys(MODEL_ALIASES)
             .map(alias => `${alias}: ${AVAILABLE_MODELS[MODEL_ALIASES[alias]]}`)
@@ -218,46 +237,44 @@ bot.help((ctx) => {
 });
 
 
-// New Chat command - clear conversation history and reset instruction
+// Команда /newchat - очистка истории диалога и сброс системных инструкций
 bot.command('newchat', (ctx) => {
     ctx.session.history = [];
-    ctx.session.systemInstruction = null; // Also reset system instruction
+    ctx.session.systemInstruction = null; // Сбрасываем системные инструкции
     ctx.reply('Начат новый чат. Предыдущая история и системные инструкции удалены.');
 });
 
-// Set System Instruction command
+// Команда /setsysteminstruction - установка системных инструкций для модели Gemini
 bot.command('setsysteminstruction', (ctx) => {
     const instruction = ctx.message.text.substring('/setsysteminstruction'.length).trim();
     if (instruction) {
         ctx.session.systemInstruction = instruction;
         ctx.reply('Системные инструкции установлены.');
     } else {
-        ctx.session.systemInstruction = null;
+        ctx.session.systemInstruction = null; // Сброс инструкций, если текст пуст
         ctx.reply('Системные инструкции сброшены. Используйте /setsysteminstruction <текст> для установки.');
     }
 });
 
-// Toggle Talk Mode command (Simple interpretation: show "Thinking..." message)
+// Команда /toggletalkmode - переключение режима "Думаю..."
 bot.command('toggletalkmode', (ctx) => {
     ctx.session.talkMode = !ctx.session.talkMode;
     ctx.reply(`"Режим мышления" (показ сообщения "Думаю...") ${ctx.session.talkMode ? 'включен' : 'выключен'}.`);
 });
 
-// Toggle URL Context tool
+// Команда /toggleurlcontext - переключение инструмента URL Context
 bot.command('toggleurlcontext', (ctx) => {
     ctx.session.tools.urlContext = !ctx.session.tools.urlContext;
-     // Note: URL Context tool is often deprecated or specific to certain non-standard tools.
-     // Google Search (Grounding) is the more common and supported tool.
     ctx.reply(`Инструмент URL Context ${ctx.session.tools.urlContext ? 'включен' : 'выключен'}. (Этот инструмент может быть устаревшим или требовать определенной модели/другой реализации)`);
 });
 
-// Toggle Grounding (Google Search) tool
+// Команда /togglegrounding - переключение инструмента Заземление (Google Search)
 bot.command('togglegrounding', (ctx) => {
     ctx.session.tools.googleSearch = !ctx.session.tools.googleSearch;
     ctx.reply(`Инструмент Заземление (Google Search) ${ctx.session.tools.googleSearch ? 'включен' : 'выключен'}.`);
 });
 
-// Set Model command
+// Команда /setmodel - выбор модели Gemini для использования
 bot.command('setmodel', (ctx) => {
     const modelName = ctx.message.text.substring('/setmodel'.length).trim().toLowerCase();
     if (!modelName) {
@@ -289,55 +306,53 @@ bot.command('setmodel', (ctx) => {
     }
 });
 
-// Show Tokens command
+// Команда /showtokens - показывает общее количество использованных токенов
 bot.command('showtokens', (ctx) => {
-    // This is a cumulative estimate based on total tokens reported by the API (input + output)
-    // for calls where usageMetadata is available. Otherwise, it's an input-only estimate.
     ctx.reply(`Общее количество использованных токенов (приблизительно): ${ctx.session.totalTokens}.`);
 });
 
 
-// --- Message Handler (Main Logic for Gemini Interaction) ---
+// --- Основной обработчик сообщений (логика взаимодействия с Gemini) ---
 
-// Use bot.on('message') to capture all message types
+// bot.on('message') обрабатывает все типы входящих сообщений
 bot.on('message', async (ctx) => {
-    // Ignore commands handled by specific command handlers
+    // Игнорируем сообщения, которые являются командами (они обрабатываются отдельными обработчиками)
     if (ctx.message.text && ctx.message.text.startsWith('/')) {
         console.log(`Ignoring message as it appears to be a command: ${ctx.message.text}`);
         return;
     }
 
-    let messageText = null; // Text from message or caption
-    const currentUserMessageParts = []; // Parts array for the current user message to send to Gemini
+    let messageText = null; // Переменная для текста сообщения или подписи к медиа
+    const currentUserMessageParts = []; // Массив "частей" (parts) для текущего сообщения пользователя Gemini API
 
-    // 1. Extract text (caption or message text)
+    // 1. Извлечение текста (из подписи или из текстового сообщения)
     if (ctx.message.text) {
         messageText = ctx.message.text;
         currentUserMessageParts.push({ text: messageText });
         console.log(`Received text message from ${ctx.from.id}: ${messageText}`);
     } else if (ctx.message.caption) {
-        // This is a media message with a caption
+        // Это медиа-сообщение с подписью
         messageText = ctx.message.caption;
         currentUserMessageParts.push({ text: messageText });
         console.log(`Received media with caption from ${ctx.from.id}: ${messageText}`);
     }
 
-    // 2. Handle media (photos, videos, documents, voice, video_note)
-    let fileId = null;
-    let telegramProvidedMimeType = null; // Mime type provided by Telegram if available
-    let fileName = null; // File name for upload
+    // 2. Обработка медиафайлов (фото, видео, документы, голосовые, видео-сообщения)
+    let fileId = null; // ID файла в Telegram
+    let telegramProvidedMimeType = null; // MIME-тип, предоставленный Telegram (если есть)
+    let fileName = null; // Имя файла для загрузки в Gemini File API
 
-    // Determine fileId, mimeType, and fileName based on message type
+    // Определяем fileId, mimeType и fileName в зависимости от типа сообщения
     if (ctx.message.photo) {
-        // Photo: get the largest size file_id. Mime type is typically image/jpeg.
+        // Фото: берем ID файла наибольшего размера
         fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-        telegramProvidedMimeType = 'image/jpeg'; // Common Telegram photo type
+        telegramProvidedMimeType = 'image/jpeg'; // Telegram часто конвертирует фото в JPEG
         fileName = `${fileId}.jpg`;
         console.log(`Received photo (file_id: ${fileId})`);
 
     } else if (ctx.message.video) {
          fileId = ctx.message.video.file_id;
-         telegramProvidedMimeType = ctx.message.video.mime_type || 'video/mp4'; // Assume mp4 if not provided
+         telegramProvidedMimeType = ctx.message.video.mime_type || 'video/mp4'; // По умолчанию mp4
          fileName = ctx.message.video.file_name || `${fileId}.mp4`;
          console.log(`Received video (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
 
@@ -349,32 +364,34 @@ bot.on('message', async (ctx) => {
 
     } else if (ctx.message.voice) {
          fileId = ctx.message.voice.file_id;
-         telegramProvidedMimeType = ctx.message.voice.mime_type || 'audio/ogg'; // Voice notes are often Ogg Opus
+         telegramProvidedMimeType = ctx.message.voice.mime_type || 'audio/ogg'; // Голосовые часто в Ogg Opus
          fileName = `${fileId}.ogg`;
          console.log(`Received voice message (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
 
     } else if (ctx.message.video_note) {
          fileId = ctx.message.video_note.file_id;
-         telegramProvidedMimeType = ctx.message.video_note.mime_type || 'video/mp4'; // Video Notes are typically mp4
+         telegramProvidedMimeType = ctx.message.video_note.mime_type || 'video/mp4'; // Видео-сообщения обычно mp4
          fileName = `${fileId}.mp4`;
          console.log(`Received video note (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
     }
-    // TODO: Extend for other media types like audio (not voice), animation, sticker if needed.
+    // TODO: Расширить для других типов медиа, если необходимо (аудио, анимация, стикеры).
 
-    // If a file ID was found, download and process it for Gemini
+    // Если найден ID файла, скачиваем и обрабатываем его для Gemini
     if (fileId) {
-        // Determine if the current model supports File API for the detected mime type
         const currentModel = ctx.session.model;
-        const isProModel = currentModel.includes('pro');
-        const isFlash1_5_or_2_5 = currentModel.includes('1.5-flash') || currentModel.includes('2.5-flash');
+        const isProModel = currentModel.includes('pro'); // Модели Pro-серии
+        const isFlash1_5_or_2_5 = currentModel.includes('1.5-flash') || currentModel.includes('2.5-flash'); // Flash-модели 1.5 и 2.5
+
         const isPdf = telegramProvidedMimeType === 'application/pdf';
         const isImage = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('image/');
         const isVideo = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('video/');
         const isAudio = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('audio/');
 
-        // General rule: inline for images (smaller), File API for PDF, video, audio (larger/complex)
-        const shouldUseInlineData = isImage; // For images, Base64 inline is simpler if size permits
-        const shouldUseFileAPI = (isProModel || isFlash1_5_or_2_5) && (isPdf || isVideo || isAudio || (isImage && !shouldUseInlineData)); // Use File API for specific types with supported models
+        // Определяем, какой метод использовать: inline_data (Base64) или File API
+        // inline_data подходит для изображений (обычно до 4MB)
+        const shouldUseInlineData = isImage;
+        // File API используется для PDF, видео, аудио и других больших файлов, если модель поддерживает
+        const shouldUseFileAPI = (isProModel || isFlash1_5_or_2_5) && (isPdf || isVideo || isAudio || (isImage && !shouldUseInlineData));
 
         if (shouldUseInlineData) {
              console.log(`Processing file ${fileId} (${telegramProvidedMimeType}) as inline image data...`);
@@ -384,14 +401,13 @@ bot.on('message', async (ctx) => {
                  if (fileData && fileData.data && fileData.mimeType.startsWith('image/')) {
                       currentUserMessageParts.push({
                           inline_data: {
-                              mime_type: fileData.mimeType, // Use detected mime type for inline
+                              mime_type: fileData.mimeType, // Используем определенный mime-тип для inline_data
                               data: fileData.data
                           }
                       });
                       console.log(`Added image part (MIME: ${fileData.mimeType}) as inline data.`);
                  } else {
                      console.warn(`Could not process file ${fileId} as inline image. Detected MIME: ${fileData ? fileData.mimeType : 'N/A'}. Falling back or skipping.`);
-                      // Fallback to text or error if inline failed/unsupported type
                       currentUserMessageParts.push({ text: `[Не удалось обработать отправленное изображение (${telegramProvidedMimeType}) как встроенное изображение.]` });
                  }
 
@@ -402,20 +418,22 @@ bot.on('message', async (ctx) => {
 
         } else if (shouldUseFileAPI) {
              console.log(`Processing file ${fileId} (${telegramProvidedMimeType}) using Gemini File API...`);
-             const fileBuffer = await downloadFileBuffer(fileId);
+             const fileBuffer = await downloadFileBuffer(fileId); // Скачиваем файл как буфер
 
              if (fileBuffer) {
-                 const uploadedFile = await uploadFileToGemini(fileBuffer, telegramProvidedMimeType, fileName);
+                 const uploadedFile = await uploadFileToGemini(fileBuffer, telegramProvidedMimeType, fileName); // Загружаем в Gemini File API
 
                  if (uploadedFile && uploadedFile.uri) {
+                     // Добавляем часть fileData, ссылающуюся на URI загруженного файла в Gemini
                      currentUserMessageParts.push({
                          fileData: {
-                             mime_type: telegramProvidedMimeType, // Use Telegram's provided mime type for File API
-                             uri: uploadedFile.uri // URI format is 'files/FID'
+                             mime_type: telegramProvidedMimeType, // Используем MIME-тип, предоставленный Telegram
+                             uri: uploadedFile.uri // URI файла в Gemini (формат: 'files/FID')
                          }
                      });
                      console.log(`Added fileData part (URI: ${uploadedFile.uri}) to prompt parts.`);
-                     // TODO: Consider implementing file deletion logic here (e.g., after successful API call or after session expires)
+                     // TODO: Здесь можно добавить логику для удаления файла из File API после использования
+                     // (файлы хранятся до 48 часов, но лучше управлять хранилищем).
                  } else {
                      console.warn(`Failed to upload file ${fileId} (${telegramProvidedMimeType}) to Gemini File API.`);
                      currentUserMessageParts.push({ text: `[Не удалось загрузить файл (${telegramProvidedMimeType}) в Gemini File API.]` });
@@ -427,60 +445,55 @@ bot.on('message', async (ctx) => {
              }
 
         } else {
-            // File type is not supported for inline OR File API with the current model
+            // Тип файла не поддерживается для inline или File API выбранной моделью
             console.warn(`File type "${telegramProvidedMimeType}" is not supported for processing with the selected model (${currentModel}) or via current methods (inline/File API).`);
              currentUserMessageParts.push({ text: `[Файл типа ${telegramProvidedMimeType} не поддерживается выбранной моделью (${currentModel}) или методом обработки.]` });
         }
 
-    } // End if (fileId)
+    } // Конец блока if (fileId)
 
-
-    // 3. Check if we have any parts to send to Gemini
+    // 3. Проверка, есть ли части для отправки в Gemini
+    // Если после обработки текста и файла parts пусты, это означает, что тип сообщения
+    // не был обработан (например, стикер, локация и т.д.)
      if (currentUserMessageParts.length === 0) {
          console.warn("Current message parts are empty after processing. Skipping Gemini call.");
-         // Reply to the user if the message type wasn't handled at all
+         // Отвечаем пользователю, если тип сообщения вообще не был обработан
          if (!ctx.message.text && !ctx.message.caption && !fileId) {
               console.log(`Received completely unhandled message type. ctx.message:`, ctx.message);
               ctx.reply('Извините, я пока умею обрабатывать для ответа через Gemini только текст, фото, видео, документы (включая PDF), голосовые сообщения и видео-сообщения (с текстом или без), при условии поддержки выбранной моделью.');
          } else {
-             // This case should ideally not be reached if fileId was processed,
-             // but as a fallback:
+              // В случае, если файл был, но его обработка не дала частей (например, ошибка)
               ctx.reply('Извините, возникла проблема с обработкой вашего сообщения.');
          }
-         return; // Stop processing if no valid parts to send
+         return; // Останавливаем дальнейшую обработку, если нет частей для отправки
      }
 
-
-    // 4. Build the full contents array for the Gemini API call
-    // The contents array should be the conversation history + the current user turn,
-    // in chronological order (oldest first).
+    // 4. Формирование полного массива содержимого (contents) для запроса к Gemini API
+    // Массив contents должен содержать историю диалога + текущий ход пользователя, в хронологическом порядке.
     const contents = [
-        ...ctx.session.history, // Add historical turns first
-        { role: 'user', parts: currentUserMessageParts } // Add the current user turn last
+        ...ctx.session.history, // Добавляем исторические ходы
+        { role: 'user', parts: currentUserMessageParts } // Добавляем текущий ход пользователя
     ];
 
-    // 5. Prepare tools based on user settings
+    // 5. Подготовка инструментов (tools) на основе настроек пользователя
     const tools = [];
-    // Google Search Tool (Grounding) is the standard supported tool
+    // Инструмент Google Search (Заземление) - это стандартный поддерживаемый инструмент
     if (ctx.session.tools.googleSearch) {
         tools.push({ googleSearch: {} });
          console.log('Google Search tool enabled for this call.');
     }
-    // URL Context is less commonly used/supported via standard tools API now
-    // We will NOT add it to the tools array for the API call in this example
-    // as it's often not supported as a generic tool object or requires special setup.
+    // URL Context менее распространен/поддерживается через стандартные инструменты API сейчас.
+    // Мы НЕ будем добавлять его в массив tools для вызова API в этом примере,
+    // так как он часто не поддерживается как общий объект инструмента.
     if (ctx.session.tools.urlContext) {
          console.warn('URL Context tool is enabled but might not be supported by the model or via standard tools configuration for API call.');
-         // If specific URL reading is needed, it might involve fetching content
-         // manually and adding it as a text part, or using a model's
-         // native URL parsing if available.
     }
 
-
-    // 6. Call Gemini API
+    // 6. Вызов Gemini API
     let thinkingMessageId = null;
     if (ctx.session.talkMode) {
          try {
+            // Отправляем сообщение "Думаю..." и сохраняем его ID для последующего удаления
             const thinkingMsg = await ctx.reply('Думаю...');
             thinkingMessageId = thinkingMsg.message_id;
          } catch (error) {
@@ -489,31 +502,31 @@ bot.on('message', async (ctx) => {
     }
 
     let geminiResponseText = 'Не удалось получить ответ от Gemini.';
-    let inputTokens = 0; // Tokens for the current prompt (history + current turn)
-    let outputTokens = 0; // Tokens for the model's reply
+    let inputTokens = 0; // Токены для текущего запроса (история + текущий ход)
+    let outputTokens = 0; // Токены для ответа модели
 
     try {
-        // Get the generative model instance
+        // Получаем экземпляр генеративной модели
         const model = genAI.getGenerativeModel({
             model: ctx.session.model,
-            // system: ctx.session.systemInstruction || undefined, // System instruction is passed in generateContent's config now
         });
 
-        // Prepare system instruction content if set, matching Java example
+        // Подготавливаем системные инструкции, если они заданы.
+        // Передаем их в `systemInstruction` параметр в вызове `generateContent`, как в Java-примере.
         const systemInstructionContent = ctx.session.systemInstruction
             ? { parts: [{ text: ctx.session.systemInstruction }] }
             : undefined;
 
-        // Call generateContent with the prepared contents, tools, and system instruction
-        console.log('Calling generateContent with contents:', JSON.stringify(contents)); // Log contents being sent
+        // Выполняем вызов generateContent с подготовленным содержимым, инструментами и системными инструкциями
+        console.log('Calling generateContent with contents:', JSON.stringify(contents));
         console.log('Using system instruction:', systemInstructionContent ? systemInstructionContent.parts[0].text : 'None');
         console.log('Using tools:', tools.length > 0 ? JSON.stringify(tools) : 'None');
 
         const result = await model.generateContent({
-             contents: contents, // Pass the full conversation history + current message
-             tools: tools.length > 0 ? tools : undefined, // Pass tools if any are enabled
-             systemInstruction: systemInstructionContent, // **THIS IS THE FIX FOR SYSTEM INSTRUCTIONS**
-             safetySettings: [ // Safety settings as previously defined
+             contents: contents, // Полная история диалога + текущее сообщение пользователя
+             tools: tools.length > 0 ? tools : undefined, // Инструменты
+             systemInstruction: systemInstructionContent, // **ИСПРАВЛЕНИЕ ДЛЯ СИСТЕМНЫХ ИНСТРУКЦИЙ**
+             safetySettings: [ // Настройки безопасности (пример: блокировка вредоносного контента)
                 { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
                 { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
                 { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -521,43 +534,42 @@ bot.on('message', async (ctx) => {
                 { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT_AND_NON_SOLICITED, threshold: HarmBlockThreshold.BLOCK_NONE },
             ],
              generationConfig: {
-                 // You could add other generation parameters here, e.g., temperature, top_p, etc.
+                 // Здесь можно добавить другие параметры генерации (например, temperature, top_p)
              }
         });
 
         const response = result.response;
 
-        // Check if the response has text parts and extract
+        // 7. Извлечение текстового ответа из ответа Gemini
         if (response && response.candidates && response.candidates.length > 0 && response.candidates[0].content && response.candidates[0].content.parts && response.candidates[0].content.parts.length > 0) {
              geminiResponseText = response.candidates[0].content.parts
-                 .map(part => part.text) // Get text from each part
-                 .filter(text => text !== undefined && text !== null) // Filter out non-text parts or nulls
-                 .join(''); // Join text parts
+                 .map(part => part.text) // Получаем текст из каждой части
+                 .filter(text => text !== undefined && text !== null) // Отфильтровываем нетекстовые части или null
+                 .join(''); // Объединяем текстовые части
         } else {
              console.warn("Gemini response did not contain text parts.", response);
              geminiResponseText = 'Не удалось получить текстовый ответ от Gemini.';
         }
 
 
-        // 7. Update Token Usage
-        // The Node.js client library provides token counts in usageMetadata if available from the API response
+        // 8. Обновление использования токенов
+        // Клиентская библиотека Node.js предоставляет информацию об использовании токенов в `usageMetadata`
          if (response.usageMetadata) {
              inputTokens = response.usageMetadata.promptTokenCount || 0;
              outputTokens = response.usageMetadata.candidatesTokenCount || 0;
              const totalTokensForCall = response.usageMetadata.totalTokenCount || 0;
              console.log(`Gemini API Usage Metadata: Input=${inputTokens}, Output=${outputTokens}, Total=${totalTokensForCall}`);
-             ctx.session.totalTokens += totalTokensForCall; // Add total tokens for this turn to cumulative total
+             ctx.session.totalTokens += totalTokensForCall; // Добавляем общее количество токенов за этот вызов к кумулятивному итогу
          } else {
-             // If usageMetadata is not available, try to estimate input tokens using countTokens
-             // This happens with some models or response types.
+             // Если `usageMetadata` недоступен в ответе, пытаемся оценить входящие токены
              try {
                  const tokenEstimation = await model.countTokens({
                      contents: contents,
                      tools: tools.length > 0 ? tools : undefined,
-                     systemInstruction: systemInstructionContent, // Pass system instruction here too for accurate count
+                     systemInstruction: systemInstructionContent, // Важно передать системные инструкции для точного подсчета
                  });
                  inputTokens = tokenEstimation.totalTokens || 0;
-                 ctx.session.totalTokens += inputTokens; // Add estimated input tokens to total
+                 ctx.session.totalTokens += inputTokens; // Добавляем только оценочные входящие токены
                  console.log(`Estimated Input tokens for this call (from countTokens): ${inputTokens}. Total cumulative (estimated, input-biased): ${ctx.session.totalTokens}`);
              } catch (tokenError) {
                  console.error('Error counting tokens after successful response:', tokenError);
@@ -565,26 +577,23 @@ bot.on('message', async (ctx) => {
          }
 
 
-        // 8. Update conversation history IF the Gemini call was successful and yielded a response
-        // Add the user's message and the bot's text reply to history
-        // Store the parts that were actually sent to Gemini for the user turn
+        // 9. Обновление истории диалога
+        // Добавляем текущий ход пользователя и текстовый ответ модели в историю
         ctx.session.history.push({ role: 'user', parts: currentUserMessageParts });
-        // Only add the model's text response to history
+        // Добавляем текстовый ответ модели в историю
         if (geminiResponseText && geminiResponseText.trim().length > 0) {
             ctx.session.history.push({ role: 'model', parts: [{ text: geminiResponseText }] });
         } else {
-             // If Gemini returned non-text or empty response, add an empty model turn
-             // to keep history aligned for proper turn-taking (user, model, user, model).
+             // Если Gemini вернул нетекстовый или пустой ответ, добавляем пустой ход модели,
+             // чтобы сохранить структуру истории (user, model, user, model).
              console.warn("Gemini response text was empty or only whitespace. Adding empty model turn to history.");
-             ctx.session.history.push({ role: 'model', parts: [{ text: '' }] }); // Add an empty text part for the model turn
+             ctx.session.history.push({ role: 'model', parts: [{ text: '' }] });
         }
 
-
-        // Keep history length manageable (e.g., last 10 back-and-forth turns = 20 messages)
-        const maxHistoryMessages = 20; // 10 user turns + 10 model turns
+        // Ограничиваем длину истории (например, последние 10 пар "вопрос-ответ" = 20 сообщений)
+        const maxHistoryMessages = 20;
         if (ctx.session.history.length > maxHistoryMessages) {
-            // Remove older messages from the beginning of the history array
-            ctx.session.history = ctx.session.history.slice(-maxHistoryMessages);
+            ctx.session.history = ctx.session.history.slice(-maxHistoryMessages); // Удаляем старые сообщения
         }
          console.log(`History size after turn: ${ctx.session.history.length}`);
 
@@ -593,7 +602,7 @@ bot.on('message', async (ctx) => {
         console.error('Error calling Gemini API:', error);
         geminiResponseText = 'Произошла ошибка при обращении к Gemini API.';
 
-        // Log specific details if available (e.g., API error messages)
+        // Логируем специфические детали ошибки API, если доступны
         if (error.response && error.response.data) {
              console.error('Gemini API Error Response Data:', error.response.data);
              if (error.response.data.error && error.response.data.error.message) {
@@ -603,11 +612,11 @@ bot.on('message', async (ctx) => {
             geminiResponseText += ` Ошибка: ${error.message}`;
         }
 
-         // Add the user's message to history even if the API call failed,
-         // so the context of the attempt is preserved for the next message.
+         // Добавляем сообщение пользователя в историю, даже если вызов API завершился ошибкой,
+         // чтобы сохранить контекст попытки.
          if (currentUserMessageParts.length > 0) {
              ctx.session.history.push({ role: 'user', parts: currentUserMessageParts });
-              // Keep history length manageable even on error
+              // Ограничиваем длину истории даже при ошибке
               const maxHistoryMessages = 20;
               if (ctx.session.history.length > maxHistoryMessages) {
                   ctx.session.history = ctx.session.history.slice(-maxHistoryMessages);
@@ -616,28 +625,29 @@ bot.on('message', async (ctx) => {
          console.log(`History size after error: ${ctx.session.history.length}`);
 
     } finally {
-         // Always attempt to delete the "Thinking..." message if it was sent
+         // Всегда пытаемся удалить сообщение "Думаю...", если оно было отправлено
          if (thinkingMessageId) {
              try {
                  await ctx.deleteMessage(thinkingMessageId);
                  console.log(`Deleted "Thinking..." message ${thinkingMessageId}`);
              } catch (deleteError) {
+                 // Игнорируем ошибки удаления, т.к. сообщение могло не отправиться
                  console.error(`Error deleting "Thinking..." message ${thinkingMessageId}:`, deleteError);
              }
          }
     }
 
 
-    // 9. Send final response to Telegram
+    // 10. Отправка итогового ответа в Telegram
     try {
-        // If the Gemini response text is empty or only whitespace, send a default message
+        // Если ответ Gemini пуст или содержит только пробелы, отправляем сообщение по умолчанию
         if (!geminiResponseText || geminiResponseText.trim().length === 0) {
              console.warn("Final Gemini response text was empty, sending a default message.");
-             // Only send this if an error message wasn't already generated
-             if (!geminiResponseText.startsWith('Произошла ошибка')) { // Check if it's already an error message
+             // Отправляем сообщение по умолчанию, только если это еще не сообщение об ошибке
+             if (!geminiResponseText.startsWith('Произошла ошибка')) {
                  await ctx.reply("Не удалось сгенерировать ответ. Попробуйте еще раз или измените запрос/настройки.");
              } else {
-                 // If geminiResponseText already contains an error, send that
+                 // Если geminiResponseText уже содержит ошибку, отправляем ее
                   await ctx.reply(geminiResponseText);
              }
         } else {
@@ -650,31 +660,33 @@ bot.on('message', async (ctx) => {
 });
 
 
-// --- Webhook Setup ---
+// --- Настройка вебхука Express ---
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 3000; // Render предоставит порт через переменную окружения PORT
 
-app.use(express.json()); // Middleware to parse JSON body
+app.use(express.json()); // Middleware для парсинга JSON тела запроса
 
-// Use the bot.webhookCallback('/webhook') middleware provided by Telegraf
+// Используем middleware `bot.webhookCallback('/webhook')` от Telegraf
+// Он обрабатывает входящий запрос вебхука и передает его экземпляру бота.
 app.use(bot.webhookCallback('/webhook'));
 
-// Root endpoint for status check
+// Корневая конечная точка '/' для проверки статуса сервера
 app.get('/', (req, res) => {
     res.send('Telegram Bot server is running and waiting for webhooks at /webhook. Gemini integration enabled.');
 });
 
-// --- Start Server ---
+// --- Запуск сервера ---
 app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-    console.log(`Webhook endpoint configured at /webhook`);
+    console.log(`Сервер запущен на порту ${port}`);
+    console.log(`Эндпоинт для вебхуков настроен по пути: /webhook`);
     console.log(`Telegram Bot Token loaded.`);
     console.log(`Gemini API Key loaded.`);
-    console.log('Awaiting incoming webhooks from Telegram...');
+    console.log('Ожидание входящих вебхуков от Telegram...');
 });
 
-// Important: Do NOT call bot.launch() when using webhooks.
+// ВАЖНО: При использовании вебхуков НЕ вызывайте `bot.launch()`,
+// который используется для режима long polling.
 
-// Optional: Enable graceful stop (for local development or specific environments)
-// process.once('SIGINT', () => bot.stop('SIGINT'));
-// process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// Опционально: Включение корректного завершения работы (для локальной разработки или специфических сред)
+// process.once('SIGINT', () => bot.stop('SIGINT')); // Для прерывания Ctrl+C
+// process.once('SIGTERM', () => bot.stop('SIGTERM')); // Для сигналов завершения от ОС/хостинга
