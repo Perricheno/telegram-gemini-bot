@@ -1,109 +1,128 @@
 // app.js
 
-// Загружаем переменные окружения из .env файла, если он существует.
-// Это полезно для локальной разработки. На Render переменные окружения
-// будут предоставлены хостингом напрямую.
-// Эта строка должна быть самой первой в файле.
+// Загружаем переменные окружения из .env файла (для локальной разработки).
 require('dotenv').config();
 
 // Импортируем необходимые библиотеки
 const { Telegraf } = require('telegraf');
 const express = require('express');
-// const path = require('path'); // path не используется в этом простом примере, но может пригодиться
 
 // 1. Получаем токен бота из переменной окружения
-// process.env содержит переменные окружения системы и те, что загружены dotenv.config().
 const token = process.env.TELEGRAM_BOT_TOKEN;
 
-// 2. Проверяем, был ли токен успешно загружен.
-// Без токена бот не сможет подключиться к Telegram API.
+// 2. Проверяем наличие токена
 if (!token) {
     console.error('Ошибка: Переменная окружения TELEGRAM_BOT_TOKEN не установлена.');
     console.error('Пожалуйста, установите TELEGRAM_BOT_TOKEN в переменных окружения Render или в локальном файле .env');
-    // Завершаем выполнение программы с кодом ошибки.
     process.exit(1);
 }
 
-// 3. Инициализируем экземпляр бота Telegraf с полученным токеном.
+// 3. Инициализируем экземпляр бота Telegraf
 const bot = new Telegraf(token);
 
-// 4. Определяем обработчик для всех входящих текстовых сообщений.
-// bot.on('text', ...) регистрирует функцию, которая будет вызвана
-// для каждого сообщения, тип которого 'text'.
-// Используем async, хотя для ctx.reply в данном случае await не строго обязателен,
-// но это хорошая практика для асинхронных операций.
-bot.on('text', async (ctx) => {
-  // Логируем полученное сообщение (полезно для отладки на Render через логи).
-  console.log(`Получено сообщение от ${ctx.from.first_name || ctx.from.username}: ${ctx.message.text}`);
+// 4. Определяем УНИВЕРСАЛЬНЫЙ обработчик для ВСЕХ входящих сообщений ('message').
+// Этот обработчик будет вызван для любого типа сообщения (текст, фото, видео и т.д.).
+bot.on('message', async (ctx) => {
+  // Логируем получение любого сообщения
+  console.log(`Получено сообщение типа: ${ctx.update.message.chat.type} от ${ctx.from.first_name || ctx.from.username}`);
 
-  // Отправляем обратно тот же текст сообщения, который был получен.
   try {
-    await ctx.reply(ctx.message.text);
-    console.log(`Отправлен ответ: ${ctx.message.text}`);
+    // Проверяем, какой тип контента содержится в сообщении, и отправляем его обратно.
+    // Проверяем специфичные типы первыми.
+    if (ctx.message.photo) {
+      // Для фото Telegraf предоставляет массив объектов PhotoSize.
+      // Последний элемент обычно имеет самое высокое разрешение.
+      const photoId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+      const caption = ctx.message.caption;
+      console.log(`Повторяем фото (ID: ${photoId}) с подписью: "${caption || ''}"`);
+      await ctx.replyWithPhoto(photoId, { caption: caption });
+
+    } else if (ctx.message.video) {
+      const videoId = ctx.message.video.file_id;
+      const caption = ctx.message.caption;
+      console.log(`Повторяем видео (ID: ${videoId}) с подписью: "${caption || ''}"`);
+      await ctx.replyWithVideo(videoId, { caption: caption });
+
+    } else if (ctx.message.audio) {
+      const audioId = ctx.message.audio.file_id;
+      const caption = ctx.message.caption;
+      console.log(`Повторяем аудио (ID: ${audioId}) с подписью: "${caption || ''}"`);
+      await ctx.replyWithAudio(audioId, { caption: caption });
+
+    } else if (ctx.message.document) {
+      const documentId = ctx.message.document.file_id;
+      const caption = ctx.message.caption;
+       console.log(`Повторяем документ (ID: ${documentId}) с подписью: "${caption || ''}"`);
+      await ctx.replyWithDocument(documentId, { caption: caption });
+
+    } else if (ctx.message.sticker) {
+      const stickerId = ctx.message.sticker.file_id;
+      console.log(`Повторяем стикер (ID: ${stickerId})`);
+      await ctx.replyWithSticker(stickerId);
+
+    } else if (ctx.message.animation) {
+        const animationId = ctx.message.animation.file_id;
+        const caption = ctx.message.caption;
+        console.log(`Повторяем анимацию (ID: ${animationId}) с подписью: "${caption || ''}"`);
+        await ctx.replyWithAnimation(animationId, { caption: caption });
+
+    } else if (ctx.message.voice) {
+        const voiceId = ctx.message.voice.file_id;
+        console.log(`Повторяем голосовое сообщение (ID: ${voiceId})`);
+        await ctx.replyWithVoice(voiceId);
+
+    } else if (ctx.message.video_note) {
+        const videoNoteId = ctx.message.video_note.file_id;
+        console.log(`Повторяем видео-сообщение (ID: ${videoNoteId})`);
+        await ctx.replyWithVideoNote(videoNoteId);
+
+    } else if (ctx.message.text) {
+      // Если это обычный текст, повторяем его.
+      console.log(`Повторяем текст: "${ctx.message.text}"`);
+      await ctx.reply(ctx.message.text);
+
+    } else {
+      // Обработка других типов сообщений, которые мы пока не обрабатываем явно.
+      console.log('Получено сообщение необрабатываемого типа:', ctx.message);
+      // Опционально, можно отправить пользователю сообщение о том, что тип не поддерживается:
+      // await ctx.reply('Извините, я пока умею повторять только текст и медиафайлы.');
+    }
+
   } catch (error) {
-    // Логируем ошибки, если что-то пошло не так при отправке.
-    console.error('Ошибка при отправке ответа:', error);
+    console.error('Ошибка при обработке и повторении сообщения:', error);
+    // Опционально, можно уведомить пользователя об ошибке
+    // await ctx.reply('Произошла ошибка при обработке вашего сообщения.');
   }
 });
 
-// Опционально: Можно добавить обработчики для команд или других типов сообщений.
-// Например, обработчик команды /start:
-// bot.start((ctx) => ctx.reply('Привет! Я простой Эхо бот. Напиши мне что-нибудь, и я повторю.'));
-
 // ------------------------------------------------------------
-// 5. Настройка веб-сервера Express для обработки вебхуков от Telegram.
-// Telegraf в режиме вебхуков требует наличия веб-сервера, который
-// будет принимать POST запросы от Telegram и передавать их боту.
+// 5. Настройка веб-сервера Express для обработки вебхуков
 // ------------------------------------------------------------
 
-// Инициализируем приложение Express.
 const app = express();
-
-// Определяем порт, на котором веб-сервер будет слушать запросы.
-// Render предоставляет порт через переменную окружения PORT.
-// Локально, если PORT не установлен, будет использоваться порт 3000.
 const port = process.env.PORT || 3000;
 
-// Middleware для парсинга входящих JSON тел запросов.
-// Telegram отправляет обновления через вебхуки в формате JSON.
 app.use(express.json());
 
-// Определяем маршрут '/webhook', на который Telegram будет отправлять POST запросы с обновлениями.
-// Этот маршрут будет принимать данные и передавать их в Telegraf для обработки.
 app.post('/webhook', (req, res) => {
-    // bot.handleUpdate(req.body) принимает тело запроса (JSON с обновлением)
-    // и передает его в Telegraf для обработки зарегистрированными обработчиками (bot.on, bot.command и т.д.).
     bot.handleUpdate(req.body);
-    // Отправляем HTTP статус 200 OK в ответ на запрос Telegram,
-    // чтобы подтвердить, что обновление было получено и обрабатывается.
-    res.sendStatus(200);
+    res.sendStatus(200); // Отправляем 200 OK в ответ на запрос Telegram
 });
 
-// Опционально: Добавляем простой корневой эндпоинт '/' для проверки статуса сервера.
-// При переходе по главному URL задеплоенного сервиса на Render можно будет увидеть это сообщение.
+// Корневой эндпоинт для проверки статуса
 app.get('/', (req, res) => {
   res.send('Telegram Echo Bot server is running and waiting for webhooks at /webhook.');
 });
 
 // ------------------------------------------------------------
-// 6. Запуск веб-сервера Express.
+// 6. Запуск веб-сервера
 // ------------------------------------------------------------
 
-// Запускаем сервер на определенном порту.
 app.listen(port, () => {
   console.log(`Сервер запущен на порту ${port}`);
   console.log(`Эндпоинт для вебхуков настроен по пути: /webhook`);
-  // Логируем, был ли токен успешно загружен.
   console.log(`Токен бота загружен: ${token ? 'Да' : 'Нет'}`);
   console.log('Ожидание входящих вебхуков от Telegram...');
-
-  // При локальном запуске, тебе нужно будет вручную установить вебхук
-  // (например, используя ngrok для получения публичного URL).
-  // При деплое на Render, вебхук устанавливается один раз с публичным URL Render
-  // запросом к Telegram Bot API.
 });
 
-// ВАЖНОЕ ПРИМЕЧАНИЕ:
-// При использовании вебхуков, мы запускаем ТОЛЬКО веб-сервер (app.listen).
-// Мы НЕ вызываем bot.launch(), который используется для режима long polling.
-// Telegraf получает обновления через middleware Express и вызов bot.handleUpdate().
+// В режиме вебхуков НЕ вызываем bot.launch()
