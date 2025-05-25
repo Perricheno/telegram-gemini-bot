@@ -55,7 +55,6 @@ const genAI = new GoogleGenerativeAI(geminiApiKey);
 
 // Correct way to get the FileService client for uploading files to Gemini.
 // This service does not require a specific model instance.
-// **FIXED LINE**: Access fileService directly from genAI instance.
 const fileService = genAI.fileService; 
 
 // --- Telegraf Session Management ---
@@ -548,11 +547,13 @@ bot.on('message', async (ctx) => {
             tools: tools.length > 0 ? tools : undefined, // Tools to enable for this generation.
             systemInstruction: systemInstructionContent, // Correct parameter for system instructions.
             safetySettings: [ // Safety settings to control harmful content generation.
+                // Removed the problematic category. Keeping only the standard ones.
                 { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
                 { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
                 { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
                 { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT_AND_NON_SOLICITED, threshold: HarmBlockThreshold.BLOCK_NONE },
+                // Added CIVIC_INTEGRITY, as it was in the error message's recognized list.
+                { category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold: HarmBlockThreshold.BLOCK_NONE },
             ],
             generationConfig: {
                 // Future generation parameters (e.g., temperature, top_p) could be added here.
