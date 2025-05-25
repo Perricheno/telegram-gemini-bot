@@ -33,7 +33,8 @@ const bot = new Telegraf(telegramToken);
 // Инициализируем клиент Google Generative AI
 const genAI = new GoogleGenerativeAI(geminiApiKey);
 // Получаем клиент FileService для работы с Gemini File API (загрузка файлов)
-const fileService = genAI.getGenerativeModel('').getFileService(); // File Service не требует указания конкретной модели
+// *** ИСПРАВЛЕНИЕ: ПРАВИЛЬНЫЙ СПОСОБ ПОЛУЧЕНИЯ FILESERVICE ***
+const fileService = genAI.get.fileService;
 
 // --- Управление сессиями Telegraf ---
 // Используем встроенное в Telegraf управление сессиями.
