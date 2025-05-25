@@ -15,7 +15,7 @@
  * - Google Search (Grounding) tool integration
  * - Token usage tracking (approximate)
  * - "Thinking..." message during AI processing
- * - Error handling and logging for robust operation
+ * - Robust error handling and detailed logging
  *
  * Deployment: Designed for webhook-based deployment on platforms like Render.
  * Session Management: Uses in-memory session for simplicity. For production, consider persistent storage.
@@ -55,7 +55,8 @@ const genAI = new GoogleGenerativeAI(geminiApiKey);
 
 // Correct way to get the FileService client for uploading files to Gemini.
 // This service does not require a specific model instance.
-const fileService = genAI.getGenerativeFileService(); // **FIXED LINE**
+// **FIXED LINE**: Access fileService directly from genAI instance.
+const fileService = genAI.fileService; 
 
 // --- Telegraf Session Management ---
 // Using Telegraf's built-in session middleware.
@@ -507,9 +508,6 @@ bot.on('message', async (ctx) => {
     // It is NOT added to the `tools` array for the API call in this example.
     if (ctx.session.tools.urlContext) {
         console.warn('TOOLS_WARNING: URL Context tool is enabled but might not be supported by the model or via standard tools configuration for API call.');
-        // If specific URL reading is needed, it might involve fetching content
-        // manually and adding it as a text part, or relying on a model's
-        // native URL parsing if available.
     }
 
     // 6. Call the Gemini API.
@@ -548,7 +546,7 @@ bot.on('message', async (ctx) => {
         const result = await model.generateContent({
             contents: contents, // Full conversation history + current user message.
             tools: tools.length > 0 ? tools : undefined, // Tools to enable for this generation.
-            systemInstruction: systemInstructionContent, // **CORRECTED: System instructions parameter.**
+            systemInstruction: systemInstructionContent, // Correct parameter for system instructions.
             safetySettings: [ // Safety settings to control harmful content generation.
                 { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
                 { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
