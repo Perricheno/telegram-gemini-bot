@@ -267,51 +267,83 @@ async function downloadFileAsBase64(fileId) {
 async function uploadFileToGemini(buffer, mimeType, fileName) {
     if (!buffer || !mimeType || !fileName) {
         console.error('FILE_UPLOAD_ERROR: Missing required parameters (buffer, mimeType, or fileName) for Gemini upload.');
-        return { success: false, error: 'missing_parameters', details: 'Buffer, mimeType, or fileName missing.' };
+        return { success: false, error: 'gemini_upload_missing_parameters', details: 'Buffer, mimeType, or fileName missing for Gemini upload.' };
     }
-    console.log(`GEMINI_FILE_UPLOAD: Starting upload for "${fileName}" (MIME: ${mimeType})...`);
+
+    let initialUploadResponse;
+    let lastInitialUploadError = null;
+    const maxUploadAttempts = 3; // Number of attempts for the initial file upload.
+    let currentUploadAttempt = 0;
+
+    // --- 1. Initial File Upload with Retries ---
+    while (currentUploadAttempt < maxUploadAttempts) {
+        currentUploadAttempt++;
+        try {
+            console.log(`GEMINI_FILE_UPLOAD: Attempt ${currentUploadAttempt}/${maxUploadAttempts} to upload "${fileName}" (Input MIME: ${mimeType})...`);
+            initialUploadResponse = await fileService.uploadFile(buffer, {
+                mimeType: mimeType, // This is the detectedMimeType from your bot
+                displayName: fileName,
+            });
+            console.log(`GEMINI_FILE_UPLOAD: Initial upload attempt ${currentUploadAttempt} successful for "${fileName}".`);
+            lastInitialUploadError = null; // Clear any previous error on success.
+            break; // Exit loop if upload is successful.
+        } catch (error) {
+            lastInitialUploadError = error;
+            console.warn(`GEMINI_FILE_UPLOAD: Attempt ${currentUploadAttempt}/${maxUploadAttempts} FAILED for "${fileName}". Error: ${error.message}`);
+            if (error.response && error.response.data) {
+                console.warn('GEMINI_API_ERROR_DETAILS (upload attempt):', JSON.stringify(error.response.data));
+            }
+            if (currentUploadAttempt < maxUploadAttempts) {
+                const delay = 1500 * currentUploadAttempt; // Basic exponential backoff.
+                console.log(`GEMINI_FILE_UPLOAD: Retrying in ${delay / 1000}s...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+
+    if (!initialUploadResponse || lastInitialUploadError) {
+        console.error(`GEMINI_FILE_UPLOAD: All ${maxUploadAttempts} initial upload attempts FAILED for "${fileName}". Last error:`, lastInitialUploadError.message);
+        return { success: false, error: 'gemini_upload_initial_failed', details: `Failed after ${maxUploadAttempts} attempts. Last error: ${lastInitialUploadError.message}` };
+    }
+
+    let file = initialUploadResponse.file; // The file object returned by the File API after initial upload.
+    console.log(`GEMINI_FILE_UPLOAD: Initial upload complete. Name: ${file.name}, State: ${file.state}, URI (download): ${file.uri}, Initial MIME from Gemini: ${file.mimeType}`);
+
+    // --- 2. Polling for File Processing to become ACTIVE ---
+    // The 'name' (e.g., 'files/your-file-id') is used for getFile and in generateContent.
     try {
-        const uploadResult = await fileService.uploadFile(buffer, {
-            mimeType: mimeType,
-            displayName: fileName, // Display name in Gemini API.
-        });
-
-        let file = uploadResult.file; // The file object returned by the File API.
-        console.log(`GEMINI_FILE_UPLOAD: Initial upload complete. Name: ${file.name}, State: ${file.state}, URI (download): ${file.uri}`);
-
-        // Polling to wait for the file to be processed (state: ACTIVE)
-        // Gemini API requires files to be processed before they can be used in generateContent.
-        // The 'name' (e.g., 'files/your-file-id') is used for getFile and in generateContent.
-        // The 'uri' on the File object is a download URI, not the one for generateContent.
         if (file.state === 'PROCESSING') {
             console.log(`GEMINI_FILE_PROCESSING: File "${file.name}" is PROCESSING. Starting polling...`);
             let attempts = 0;
             const maxAttempts = 12; // Poll for up to 60 seconds (12 * 5s)
             while (file.state === 'PROCESSING' && attempts < maxAttempts) {
                 await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
-                file = await fileService.getFile(file.name); // Fetch updated file status
+                const getFileResponse = await fileService.getFile(file.name); // Fetch updated file status
+                file = getFileResponse.file; // Correctly access the file object
                 attempts++;
                 console.log(`GEMINI_FILE_PROCESSING: Polling attempt ${attempts}/${maxAttempts}. File "${file.name}" state: ${file.state}`);
             }
         }
 
         if (file.state === 'ACTIVE') {
-            console.log(`GEMINI_FILE_SUCCESS: File "${file.name}" is ACTIVE and ready. MIME: ${file.mimeType}.`);
+            console.log(`GEMINI_FILE_SUCCESS: File "${file.name}" is ACTIVE and ready. Final MIME from Gemini: ${file.mimeType}.`);
+            if (mimeType !== file.mimeType) {
+                console.log(`GEMINI_MIME_INFO: Input MIME ("${mimeType}") differs from Gemini's final MIME ("${file.mimeType}") for file "${fileName}".`);
+            }
             return { success: true, file: file }; // Return the processed file object
         } else if (file.state === 'FAILED') {
             console.error(`GEMINI_FILE_ERROR: File processing FAILED for "${file.name}". State: ${file.state}.`);
-            return { success: false, error: 'processing_failed', details: `File state: ${file.state}` };
+            return { success: false, error: 'gemini_upload_processing_failed', details: `Gemini reported file state: ${file.state}` };
         } else {
             console.warn(`GEMINI_FILE_WARNING: File "${file.name}" processing timed out or ended in unexpected state: ${file.state}.`);
-            return { success: false, error: 'processing_timeout_or_unexpected_state', details: `File state: ${file.state}` };
+            return { success: false, error: 'gemini_upload_processing_timeout_or_unexpected', details: `File state after polling: ${file.state}` };
         }
-
-    } catch (error) {
-        console.error(`GEMINI_FILE_ERROR: Exception during upload or processing for "${fileName}" (MIME: ${mimeType}):`, error);
-        if (error.response && error.response.data) {
-            console.error('GEMINI_API_ERROR_DETAILS:', error.response.data);
+    } catch (pollingError) {
+        console.error(`GEMINI_FILE_ERROR: Exception during polling/getFile for "${fileName}" (Input MIME: ${mimeType}):`, pollingError);
+        if (pollingError.response && pollingError.response.data) {
+            console.error('GEMINI_API_ERROR_DETAILS (polling):', JSON.stringify(pollingError.response.data));
         }
-        return { success: false, error: 'upload_exception', details: error.message };
+        return { success: false, error: 'gemini_upload_polling_exception', details: pollingError.message };
     }
 }
 
