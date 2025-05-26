@@ -568,75 +568,92 @@ bot.on('message', async (ctx) => {
     // If a file ID was found, proceed to download and process it for Gemini.
     if (fileId) {
         // Download the file buffer once for MIME detection and subsequent upload.
-        fileBuffer = await downloadFileBuffer(fileId);
+        fileBuffer = await downloadFileBuffer(fileId); // fileBuffer is already declared
+
         if (!fileBuffer) {
             console.warn(`FILE_PROCESSING_WARNING: Failed to download file buffer for ${fileId}. Skipping processing.`);
             currentUserMessageParts.push({ text: `[Не удалось скачать файл из Telegram.]` });
-        } else if (telegramProvidedMimeType) { // Check if telegramProvidedMimeType is available
-            // Use the enhanced MIME type detection with the downloaded buffer.
-            const detectedMimeType = detectMimeType(fileBuffer, fileName || '');
-            console.log(`FILE_PROCESSING: Original Telegram MIME: ${telegramProvidedMimeType}, Detected MIME: ${detectedMimeType}`);
-            telegramProvidedMimeType = detectedMimeType; // Use the more accurate detected MIME type.
+        } else {
+            // File buffer is available. Proceed with MIME detection and processing.
+            // Use the custom detectMimeType function as the primary source for MIME type.
+            // fileName (derived earlier) is used as a hint for detectMimeType if needed.
+            const detectedMimeType = detectMimeType(fileBuffer, fileName || 'unknown_file');
+            
+            console.log(`FILE_PROCESSING_INFO: Telegram-provided MIME: '${telegramProvidedMimeType}', Detected MIME by custom function: '${detectedMimeType}', Filename: '${fileName || 'N/A'}'`);
+
+            // The 'effectiveMimeType' is what we'll use for Gemini.
+            // Prioritize the detectedMimeType.
+            let effectiveMimeType = detectedMimeType;
+
+            // Sanity check: if detection results in octet-stream but Telegram provided something more specific,
+            // it *might* indicate a need to refine detectMimeType for that case.
+            // However, we generally trust our buffer-based detection more.
+            if (detectedMimeType === 'application/octet-stream' && 
+                telegramProvidedMimeType && 
+                telegramProvidedMimeType !== 'application/octet-stream') {
+                console.warn(`FILE_PROCESSING_CONSIDERATION: Custom detection yielded 'application/octet-stream', while Telegram suggested '${telegramProvidedMimeType}'. Using detected type. If issues arise for '${fileName}', review 'detectMimeType'.`);
+            }
 
             const currentModel = ctx.session.model;
-            const strategy = getFileProcessingStrategy(telegramProvidedMimeType, currentModel);
+            const strategy = getFileProcessingStrategy(effectiveMimeType, currentModel);
 
-            // --- DEBUGGING LOGS FOR FILE PROCESSING DECISION ---
-            console.log(`DEBUG_FILE_LOGIC: currentModel: "${currentModel}"`);
-            console.log(`DEBUG_FILE_LOGIC: telegramProvidedMimeType (final): "${telegramProvidedMimeType}"`);
-            console.log(`DEBUG_FILE_LOGIC: Strategy: ${JSON.stringify(strategy)}`);
-            // --- END DEBUGGING LOGS ---
+            console.log(`DEBUG_FILE_STRATEGY: Model: '${currentModel}', Effective MIME: '${effectiveMimeType}', Strategy: ${JSON.stringify(strategy)}`);
 
             if (strategy.canProcess) {
-                if (strategy.useInlineData) {
-                    console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) as inline image data...`);
+                if (strategy.useInlineData) { // Typically for images
+                    console.log(`FILE_PROCESSING_ACTION: Using inline_data for file ${fileId} (MIME: ${effectiveMimeType}).`);
                     try {
                         const base64Data = fileBuffer.toString('base64');
                         currentUserMessageParts.push({
                             inline_data: {
-                                mime_type: telegramProvidedMimeType, // Use the accurately detected MIME type.
+                                mime_type: effectiveMimeType, // Gemini expects snake_case for inline_data parts
                                 data: base64Data
                             }
                         });
-                        console.log(`FILE_PROCESSING: Added inline data part (MIME: ${telegramProvidedMimeType}).`);
+                        console.log(`FILE_PROCESSING_SUCCESS: Added inline_data part for ${fileId}.`);
                     } catch (error) {
-                        console.error('FILE_PROCESSING_ERROR: Error converting file to Base64 for inline data:', error);
-                        currentUserMessageParts.push({ text: `[Произошла ошибка при обработке отправленного файла (${telegramProvidedMimeType}) как встроенного изображения.]` });
+                        console.error(`FILE_PROCESSING_ERROR: Failed to convert file ${fileId} to Base64 for inline_data:`, error);
+                        currentUserMessageParts.push({ text: `[Ошибка при обработке файла (${effectiveMimeType}) как встроенного изображения.]` });
                     }
-                } else if (strategy.useFileAPI) {
-                    console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) using Gemini File API...`);
-                    const uploadedFile = await uploadFileToGemini(fileBuffer, telegramProvidedMimeType, fileName); // Upload to Gemini File API
+                } else if (strategy.useFileAPI) { // For PDFs, videos, audio, larger files
+                    console.log(`FILE_PROCESSING_ACTION: Using File API for file ${fileId} (MIME: ${effectiveMimeType}, Name: '${fileName}').`);
+                    // Ensure a display name for the upload.
+                    const uploadDisplayName = fileName || `file_${fileId}_${Date.now()}`;
+                    
+                    const uploadedFileObject = await uploadFileToGemini(fileBuffer, effectiveMimeType, uploadDisplayName);
 
-                    if (uploadedFile && uploadedFile.uri) {
+                    if (uploadedFileObject && uploadedFileObject.name) { // Use .name for fileUri
                         currentUserMessageParts.push({
                             fileData: {
-                                mime_type: telegramProvidedMimeType, // Use Telegram's provided MIME type for File API.
-                                uri: uploadedFile.uri                 // URI format: 'files/FID'.
+                                mimeType: effectiveMimeType, // Correct: camelCase for fileData parts
+                                fileUri: uploadedFileObject.name  // Correct: camelCase and use .name (e.g., "files/...")
                             }
                         });
-                        console.log(`FILE_PROCESSING: Added fileData part (URI: ${uploadedFile.uri}) to prompt parts.`);
-                        // TODO: Implement a strategy to delete files from File API after use (e.g., after the conversation or a set time).
+                        console.log(`FILE_PROCESSING_SUCCESS: Added fileData part (File URI: ${uploadedFileObject.name}) for ${fileId}.`);
+                        // Consider implementing file deletion from Gemini, e.g., after 48 hours or session end.
+                        // setTimeout(() => deleteGeminiFile(uploadedFileObject.name), 48 * 60 * 60 * 1000);
                     } else {
-                        console.warn(`FILE_PROCESSING_WARNING: Failed to upload file ${fileId} (${telegramProvidedMimeType}) to Gemini File API.`);
-                        currentUserMessageParts.push({ text: `[Не удалось загрузить файл (${telegramProvidedMimeType}) в Gemini File API.]` });
+                        console.warn(`FILE_PROCESSING_FAILURE: Failed to upload file ${fileId} (MIME: ${effectiveMimeType}) to Gemini File API.`);
+                        currentUserMessageParts.push({ text: `[Не удалось загрузить файл (${effectiveMimeType}) в Gemini File API.]` });
                     }
+                } else {
+                    // This case implies a logic error in getFileProcessingStrategy if canProcess is true
+                    // but neither useInlineData nor useFileAPI is true.
+                    console.warn(`FILE_PROCESSING_WARNING: File type '${effectiveMimeType}' was processable by strategy, but no specific method (inline/FileAPI) was selected. Review getFileProcessingStrategy.`);
+                    currentUserMessageParts.push({ text: `[Внутренняя ошибка: не удалось определить метод обработки для файла типа ${effectiveMimeType}.]` });
                 }
             } else {
                 // File type is not supported by the current model or overall strategy.
-                console.warn(`FILE_PROCESSING_WARNING: File type "${telegramProvidedMimeType}" is not supported for processing with the selected model (${currentModel}) or via current methods.`);
-                let userMessage = `[Файл типа ${telegramProvidedMimeType} не поддерживается выбранной моделью (${currentModel}) или методом обработки.]`;
-                if (strategy.recommendation === 'upgrade_model') {
-                    userMessage += ` Для лучшей поддержки попробуйте выбрать более мощную модель, например, 'pro2.5' или 'flash2.5'.`;
+                console.warn(`FILE_PROCESSING_UNSUPPORTED: File type '${effectiveMimeType}' (detected) / '${telegramProvidedMimeType}' (Telegram) for file '${fileName}' is not supported for processing with model '${currentModel}'. Strategy recommendation: ${strategy.recommendation}`);
+                let userMessage = `[Файл типа ${effectiveMimeType} не поддерживается выбранной моделью (${currentModel}).]`;
+                if (!strategy.isSupported) { // If the bot generally doesn't know this file type
+                     userMessage = `[Файл типа ${effectiveMimeType} не поддерживается этим ботом.]`;
+                } else if (strategy.recommendation === 'upgrade_model') {
+                    userMessage += ` Попробуйте выбрать более мощную модель (например, 'pro2.5', 'flash2.5') через команду /setmodel.`;
                 }
                 currentUserMessageParts.push({ text: userMessage });
             }
         }
-        // Handle the case where telegramProvidedMimeType is not available
-        else {
-            console.warn(`FILE_PROCESSING_WARNING: No MIME type provided by Telegram for file ${fileId}. Skipping processing.`);
-            currentUserMessageParts.push({ text: `[Не удалось определить тип файла.]` });
-        }
-
     } // End of file processing block.
 
     // 3. Final check for parts to send to Gemini.
