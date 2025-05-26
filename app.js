@@ -1,21 +1,25 @@
 // app.js
 
 /**
- * Telegram Bot with Gemini AI Integration.
+ * Telegram Bot with focused Gemini AI Integration.
  *
  * This bot handles various message types (text, photos, videos, documents, voice notes, video notes)
- * and processes them using Google's Gemini Pro/Flash models via the Generative AI API.
+ * and processes them using Google's selected Gemini models via the Generative AI API.
  * It leverages Gemini's File API for larger multimedia content (PDFs, videos, audio).
  *
+ * Selected Models: gemini-2.5-flash, gemini-2.0-flash, gemini-2.5-pro.
+ * These models are optimized for multimodal understanding.
+ *
  * Features:
- * - Text and multimodal input processing (images via inline_data, others via File API)
- * - Conversation history management
- * - Customizable Gemini model selection
- * - System instructions for guiding AI behavior
- * - Google Search (Grounding) tool integration
- * - Token usage tracking (approximate)
- * - "Thinking..." message during AI processing
- * - Robust error handling and detailed logging
+ * - Text and comprehensive multimodal input processing (images via inline_data,
+ *   PDFs, videos, voice notes, video notes via Gemini File API).
+ * - Conversation history management.
+ * - Restricted and customizable Gemini model selection.
+ * - System instructions for guiding AI behavior.
+ * - Google Search (Grounding) tool integration.
+ * - Token usage tracking (approximate).
+ * - "Thinking..." message during AI processing.
+ * - Robust error handling and detailed logging.
  *
  * Deployment: Designed for webhook-based deployment on platforms like Render.
  * Session Management: Uses in-memory session for simplicity. For production, consider persistent storage.
@@ -73,7 +77,8 @@ bot.use((ctx, next) => {
         ctx.session = {
             history: [],                    // Stores conversation turns (user/model) for context.
             systemInstruction: null,        // Custom system instructions for the Gemini model.
-            model: 'gemini-1.5-pro-latest', // Default Gemini model for better multimodal support.
+            // Set default model to a 2.5 Pro preview for best multimodal support among selected ones.
+            model: 'gemini-2.5-pro-preview-05-06', 
             tools: {
                 urlContext: false,          // Flag for URL context tool (may require specific implementation/model support).
                 googleSearch: true,         // Flag for Google Search (Grounding) tool, enabled by default.
@@ -90,16 +95,13 @@ bot.use((ctx, next) => {
 });
 
 // --- Gemini Model Configuration ---
-// Defines available Gemini models with aliases for user convenience and notes on capabilities.
+// Defines ONLY the requested Gemini models with aliases for user convenience and notes on capabilities.
 const AVAILABLE_MODELS = {
-    'flash-04-17': 'gemini-2.5-flash-preview-04-17', // Preview: Good for general multimodal (text, images).
-    'flash-05-20': 'gemini-2.5-flash-preview-05-20', // Preview: Similar to 04-17, often the latest flash preview.
-    'pro-05-06': 'gemini-2.5-pro-preview-05-06',     // Preview: Strong multimodal capabilities (PDF, video, audio via File API).
-    'flash-2.0': 'gemini-2.0-flash',                 // Older: Multimodal support might be less robust for complex files.
-    'flash-lite-2.0': 'gemini-2.0-flash-lite',       // Older: Likely limited multimodal.
-    'image-gen-2.0': 'gemini-2.0-flash-preview-image-generation', // CAUTION: Primarily for image generation, not conversational AI.
-    'flash-latest': 'gemini-1.5-flash-latest',       // Stable: Good for general text and image understanding.
-    'pro-latest': 'gemini-1.5-pro-latest'           // Stable: BEST for PDF, long video/audio processing via File API.
+    'flash-04-17': 'gemini-2.5-flash-preview-04-17', // Good for general multimodal (text, images, potentially limited video/audio).
+    'flash-05-20': 'gemini-2.5-flash-preview-05-20', // Latest Flash preview, similar multimodal capabilities.
+    'pro-05-06': 'gemini-2.5-pro-preview-05-06',     // Strongest multimodal capabilities (PDF, video, audio via File API).
+    'flash-2.0': 'gemini-2.0-flash',                 // Older model, multimodal support might be less robust for complex files.
+    'flash-lite-2.0': 'gemini-2.0-flash-lite',       // Older model, likely limited multimodal.
 };
 
 // Aliases for user-friendly model selection.
@@ -109,12 +111,7 @@ const MODEL_ALIASES = {
     'pro-05-06': 'pro-05-06',
     'flash': 'flash-2.0',
     'flash-lite': 'flash-lite-2.0',
-    'image-gen': 'image-gen-2.0',
-    'latest-flash': 'flash-latest',
-    'latest-pro': 'pro-latest',
-    'default': 'pro-latest', // Set 'pro-latest' as default for stronger multimodal support.
-    'flash1.5': 'flash-latest',
-    'pro1.5': 'pro-latest',
+    'default': 'pro-05-06', // Set default to the strong 2.5 Pro model.
     'flash2.5': 'flash-05-20', // Alias for the latest 2.5 Flash preview.
     'pro2.5': 'pro-05-06'      // Alias for the latest 2.5 Pro preview.
 };
@@ -319,16 +316,16 @@ bot.command('setmodel', (ctx) => {
         ctx.session.model = AVAILABLE_MODELS[alias];
         let replyText = `Модель установлена на ${ctx.session.model}.`;
         // Provide warnings/info based on selected model's capabilities.
-        if (alias === 'image-gen-2.0') {
+        if (alias === 'image-gen-2.0') { // This model should ideally be removed if it's strictly image-only and not used for chat.
             replyText += `\nВнимание: Эта модель предназначена ТОЛЬКО для генерации изображений и может не работать для диалога или обработки входящих медиа.`;
         } else if (alias.includes('preview')) {
             replyText += `\nВнимание: Это превью-модель, ее поведение может меняться.`;
         }
-        if (!AVAILABLE_MODELS[alias].includes('pro') && !AVAILABLE_MODELS[alias].includes('1.5-flash') && !AVAILABLE_MODELS[alias].includes('2.5-flash')) {
-            replyText += `\nЭта модель (${AVAILABLE_MODELS[alias]}) может иметь ограниченную поддержку мультимодальных данных (PDF, видео, аудио). Для лучшей поддержки рекомендуется использовать 'latest-pro', 'pro2.5' или 'latest-flash'.`;
-        } else if (AVAILABLE_MODELS[alias].includes('flash') && !AVAILABLE_MODELS[alias].includes('1.5') && !AVAILABLE_MODELS[alias].includes('2.5')) {
-            replyText += `\nМодели серии 2.0 Flash могут иметь ограниченную поддержку мультимодальных данных по сравнению с 1.5 Flash/Pro и 2.5 Flash/Pro.`;
+        // General warning if a less capable model is selected
+        if (!AVAILABLE_MODELS[alias].includes('pro-05-06') && !AVAILABLE_MODELS[alias].includes('flash-05-20')) {
+             replyText += `\nДля наилучшей поддержки мультимодальных данных (PDF, видео, аудио) рекомендуется использовать 'pro2.5' или 'flash2.5'.`;
         }
+
         ctx.reply(replyText);
     } else {
         ctx.reply(`Неизвестное имя модели или псевдоним: "${modelName}". Используйте /setmodel без аргументов, чтобы увидеть список доступных моделей.`);
@@ -404,8 +401,8 @@ bot.on('message', async (ctx) => {
     // If a file ID was found, proceed to download and process it for Gemini.
     if (fileId) {
         const currentModel = ctx.session.model;
-        const isProModel = currentModel.includes('pro');
-        const isFlash1_5_or_2_5 = currentModel.includes('1.5-flash') || currentModel.includes('2.5-flash');
+        // Determine if the current model is one of the capable ones (Pro or 2.5 Flash).
+        const isCapableModel = currentModel.includes('pro-05-06') || currentModel.includes('flash-05-20') || currentModel.includes('flash-04-17');
 
         const isPdf = telegramProvidedMimeType === 'application/pdf';
         const isImage = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('image/');
@@ -416,7 +413,7 @@ bot.on('message', async (ctx) => {
         // `inline_data` is typically for smaller images.
         const shouldUseInlineData = isImage;
         // File API is used for larger files (PDFs, videos, audio) and requires supported models.
-        const shouldUseFileAPI = (isProModel || isFlash1_5_or_2_5) && (isPdf || isVideo || isAudio || (isImage && !shouldUseInlineData));
+        const shouldUseFileAPI = isCapableModel && (isPdf || isVideo || isAudio || (isImage && !shouldUseInlineData));
 
         if (shouldUseInlineData) {
             console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) as inline image data...`);
@@ -547,12 +544,10 @@ bot.on('message', async (ctx) => {
             tools: tools.length > 0 ? tools : undefined, // Tools to enable for this generation.
             systemInstruction: systemInstructionContent, // Correct parameter for system instructions.
             safetySettings: [ // Safety settings to control harmful content generation.
-                // Removed the problematic category. Keeping only the standard ones.
                 { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
                 { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
                 { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
                 { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                // Added CIVIC_INTEGRITY, as it was in the error message's recognized list.
                 { category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold: HarmBlockThreshold.BLOCK_NONE },
             ],
             generationConfig: {
