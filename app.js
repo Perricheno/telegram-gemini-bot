@@ -572,7 +572,7 @@ bot.on('message', async (ctx) => {
         if (!fileBuffer) {
             console.warn(`FILE_PROCESSING_WARNING: Failed to download file buffer for ${fileId}. Skipping processing.`);
             currentUserMessageParts.push({ text: `[Не удалось скачать файл из Telegram.]` });
-        } else {
+        } else if (telegramProvidedMimeType) { // Check if telegramProvidedMimeType is available
             // Use the enhanced MIME type detection with the downloaded buffer.
             const detectedMimeType = detectMimeType(fileBuffer, fileName || '');
             console.log(`FILE_PROCESSING: Original Telegram MIME: ${telegramProvidedMimeType}, Detected MIME: ${detectedMimeType}`);
@@ -631,6 +631,12 @@ bot.on('message', async (ctx) => {
                 currentUserMessageParts.push({ text: userMessage });
             }
         }
+        // Handle the case where telegramProvidedMimeType is not available
+        else {
+            console.warn(`FILE_PROCESSING_WARNING: No MIME type provided by Telegram for file ${fileId}. Skipping processing.`);
+            currentUserMessageParts.push({ text: `[Не удалось определить тип файла.]` });
+        }
+
     } // End of file processing block.
 
     // 3. Final check for parts to send to Gemini.
