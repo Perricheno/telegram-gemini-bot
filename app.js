@@ -3,16 +3,20 @@
 /**
  * Telegram Bot with focused Gemini AI Integration.
  *
- * This bot handles various message types (text, photos, videos, documents, voice notes, video notes, audio, animations)
+ * This bot handles various message types (text, photos, videos, documents, voice notes, video notes, audio, animations, stickers)
  * and processes them using Google's selected Gemini models via the Generative AI API.
- * It leverages Gemini's File API for larger multimedia content (PDFs, videos, audio, animations).
+ * It leverages Gemini's File API for larger multimedia content (PDFs, videos, audio).
  *
  * Selected Models: gemini-2.5-flash, gemini-2.0-flash, gemini-2.5-pro.
  * These models are optimized for multimodal understanding.
  *
  * Features:
  * - Text and comprehensive multimodal input processing (images via inline_data,
- *   PDFs, videos, audio, voice notes, video notes, animations via Gemini File API).
+ *   PDFs, videos, voice notes, video notes, audio, animations via Gemini File API).
+ * - Enhanced file type detection and processing.
+ * - Support for audio files, animations, and stickers.
+ * - Improved MIME type detection using `detectMimeType` function.
+ * - Better error handling for unsupported formats.
  * - Conversation history management.
  * - Restricted and customizable Gemini model selection.
  * - System instructions for guiding AI behavior.
@@ -59,7 +63,7 @@ const genAI = new GoogleGenerativeAI(geminiApiKey);
 
 // Correct way to get the FileService client for uploading files to Gemini.
 // This service does not require a specific model instance.
-const fileService = genAI.fileService; 
+const fileService = genAI.fileService;
 
 // --- Telegraf Session Management ---
 // Using Telegraf's built-in session middleware.
@@ -70,7 +74,7 @@ const fileService = genAI.fileService;
 // Example: https://telegraf.js.org/#/middlewares?id=session
 bot.use(session({ property: 'session' }));
 
-// Middleware to initialize default session settings for new or reset sessions.
+// Middleware to initialize default session settings if not present.
 bot.use((ctx, next) => {
     // Initialize session if it's new or corrupted.
     if (!ctx.session || typeof ctx.session !== 'object') {
@@ -78,7 +82,7 @@ bot.use((ctx, next) => {
             history: [],                    // Stores conversation turns (user/model) for context.
             systemInstruction: null,        // Custom system instructions for the Gemini model.
             // Set default model to a 2.5 Pro preview for best multimodal support among selected ones.
-            model: 'gemini-2.5-pro-preview-05-06', 
+            model: 'gemini-2.5-pro-preview-05-06',
             tools: {
                 urlContext: false,          // Flag for URL context tool (may require specific implementation/model support).
                 googleSearch: true,         // Flag for Google Search (Grounding) tool, enabled by default.
@@ -116,7 +120,7 @@ const MODEL_ALIASES = {
     'pro2.5': 'pro-05-06'      // Alias for the latest 2.5 Pro preview.
 };
 
-// **FIXED**: Defined explicitly capable models for File API.
+// Defined explicitly capable models for File API.
 const CAPABLE_FILE_MODELS = [
     'gemini-2.5-pro-preview-05-06',
     'gemini-2.5-flash-preview-05-20',
@@ -125,7 +129,80 @@ const CAPABLE_FILE_MODELS = [
     'gemini-2.0-flash-lite' // Explicitly included for File API attempt.
 ];
 
-// --- Helper Functions for File Handling ---
+// --- Enhanced MIME Type Detection ---
+/**
+ * Enhanced MIME type detection based on file signatures and extensions.
+ * This function is crucial for determining the correct MIME type for Gemini's File API.
+ * @param {Buffer} buffer - File buffer to analyze.
+ * @param {string} fileName - Original filename (optional), used for extension fallback.
+ * @returns {string} Detected MIME type. Defaults to 'application/octet-stream'.
+ */
+function detectMimeType(buffer, fileName = '') {
+    if (!buffer || buffer.length < 4) {
+        return 'application/octet-stream';
+    }
+
+    const signature = buffer.subarray(0, 16).toString('hex').toUpperCase(); // Read first 16 bytes for signature.
+    const ext = fileName.toLowerCase().split('.').pop() || ''; // Get file extension.
+
+    // Image formats (common signatures)
+    if (signature.startsWith('89504E47')) return 'image/png';
+    if (signature.startsWith('FFD8FF')) return 'image/jpeg';
+    if (signature.startsWith('47494638')) return 'image/gif';
+    if (signature.startsWith('52494646') && buffer.subarray(8, 12).toString('hex').toUpperCase() === '57454250') return 'image/webp';
+    if (signature.startsWith('424D')) return 'image/bmp';
+    if (signature.startsWith('49492A00') || signature.startsWith('4D4D002A')) return 'image/tiff';
+
+    // Video formats (common signatures/extensions)
+    if (signature.includes('66747970') || ext === 'mp4') return 'video/mp4'; // ftyp is often part of MP4/MOV headers
+    if (signature.startsWith('1A45DFA3') || ext === 'webm') return 'video/webm'; // EBML signature for WebM
+    if (signature.startsWith('464C5601') || ext === 'flv') return 'video/x-flv';
+    if (ext === 'avi') return 'video/x-msvideo';
+    if (ext === 'mov' || ext === 'qt') return 'video/quicktime';
+    if (ext === 'mkv') return 'video/x-matroska';
+
+    // Audio formats (common signatures/extensions)
+    if (signature.startsWith('494433') || signature.startsWith('FFFB') || signature.startsWith('FFF3') || ext === 'mp3') return 'audio/mpeg'; // ID3 tag for MP3, FFFB/FFF3 for MP3 frames
+    if (signature.startsWith('4F676753') || ext === 'ogg') return 'audio/ogg'; // OggS for OGG
+    if (signature.startsWith('52494646') && buffer.subarray(8, 12).toString('ascii') === 'WAVE') return 'audio/wav'; // RIFF WAV
+    if (ext === 'flac') return 'audio/flac';
+    if (ext === 'aac') return 'audio/aac';
+    if (ext === 'm4a') return 'audio/mp4'; // M4A is often audio/mp4
+
+    // Document formats (common signatures/extensions)
+    if (signature.startsWith('25504446') || ext === 'pdf') return 'application/pdf'; // %PDF
+    if (signature.startsWith('504B0304') || signature.startsWith('504B0506') || signature.startsWith('504B0708')) { // PK Zip (common for Office XML formats)
+        if (ext === 'docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        if (ext === 'xlsx') return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        if (ext === 'pptx') return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+        return 'application/zip'; // Generic zip
+    }
+    if (signature.startsWith('D0CF11E0A1B11AE1')) { // OLE Compound Document (common for old Office formats)
+        if (ext === 'doc') return 'application/msword';
+        if (ext === 'xls') return 'application/vnd.ms-excel';
+        if (ext === 'ppt') return 'application/vnd.ms-powerpoint';
+        return 'application/x-ole-storage'; // Generic OLE
+    }
+
+    // Text formats (common extensions)
+    if (ext === 'txt') return 'text/plain';
+    if (ext === 'html' || ext === 'htm') return 'text/html';
+    if (ext === 'css') return 'text/css';
+    if (ext === 'js') return 'application/javascript';
+    if (ext === 'json') return 'application/json';
+    if (ext === 'xml') return 'application/xml';
+
+    // Archive formats (common signatures/extensions)
+    if (signature.startsWith('1F8B08') || ext === 'gz') return 'application/gzip'; // Gzip magic number
+    if (signature.startsWith('377ABCAF271C') || ext === '7z') return 'application/x-7z-compressed'; // 7z magic number
+    if (signature.startsWith('526172211A0700') || ext === 'rar') return 'application/x-rar-compressed'; // Rar magic number
+
+    // Fallback to generic binary stream.
+    return 'application/octet-stream';
+}
+
+
+// --- Helper Functions for File Handling (continued) ---
 
 /**
  * Downloads a file from Telegram by its file ID and returns it as a Node.js Buffer.
@@ -163,20 +240,12 @@ async function downloadFileAsBase64(fileId) {
         });
 
         const buffer = Buffer.from(response.data);
-        let mimeType = 'application/octet-stream'; // Default MIME type.
-
-        // Basic MIME type detection based on file "magic numbers" (header bytes).
-        // This is primarily for common image formats.
-        if (buffer.length >= 4) {
-            const signature = buffer.subarray(0, 4).toString('hex').toUpperCase();
-            if (signature === '89504E47') mimeType = 'image/png'; // PNG
-            else if (signature === '47494638') mimeType = 'image/gif'; // GIF
-            else if (signature.startsWith('FFD8FF')) mimeType = 'image/jpeg'; // JPEG
-            else if (signature.startsWith('52494646') && buffer.subarray(8, 12).toString('hex').toUpperCase() === '57454250') mimeType = 'image/webp'; // WebP
-        }
+        // Use the enhanced detectMimeType function here.
+        const mimeType = detectMimeType(buffer); 
 
         const base64 = buffer.toString('base64');
         return { data: base64, mimeType: mimeType };
+
     } catch (error) {
         console.error(`FILE_BASE64_CONVERSION_ERROR: Failed to download or convert file (ID: ${fileId}) to Base64:`, error);
         return null;
@@ -206,6 +275,7 @@ async function uploadFileToGemini(buffer, mimeType, fileName) {
         const file = uploadResult.file; // The file object returned by the File API.
         console.log(`FILE_UPLOAD_SUCCESS: File uploaded to Gemini File API: Name=${file.name}, URI=${file.uri}`);
         return file; // Return the file object for its URI.
+
     } catch (error) {
         console.error(`FILE_UPLOAD_ERROR: Failed to upload file "${fileName}" (${mimeType}) to Gemini File API:`, error);
         if (error.response && error.response.data) {
@@ -238,28 +308,81 @@ async function deleteGeminiFile(fileUri) {
     }
 }
 
+/**
+ * Determines the file processing strategy based on MIME type and current model capabilities.
+ * @param {string} mimeType - The detected MIME type of the file.
+ * @param {string} currentModel - The name of the currently selected Gemini model.
+ * @returns {Object} An object indicating whether the file can be processed, which method to use (inline/File API),
+ *                   and a recommendation.
+ */
+function getFileProcessingStrategy(mimeType, currentModel) {
+    const isCapableModel = CAPABLE_FILE_MODELS.includes(currentModel);
+    
+    const isImage = mimeType && mimeType.startsWith('image/');
+    const isVideo = mimeType && mimeType.startsWith('video/');
+    const isAudio = mimeType && mimeType.startsWith('audio/');
+    const isPdf = mimeType === 'application/pdf';
+    const isDocument = mimeType && (
+        mimeType.includes('document') || 
+        mimeType.includes('spreadsheet') || 
+        mimeType.includes('presentation') ||
+        mimeType === 'application/msword' ||
+        mimeType === 'application/vnd.ms-excel' ||
+        mimeType === 'application/vnd.ms-powerpoint'
+    );
+    const isText = mimeType && mimeType.startsWith('text/');
+    // Add check for common Telegram sticker/animation types if not caught by image/video.
+    // Telegram stickers are often WebP (image/webp)
+    const isStickerOrAnimation = mimeType && (mimeType.includes('image/webp') || mimeType.includes('video/') || mimeType.includes('animation/'));
+
+
+    // The `canProcess` logic should broadly cover what Gemini *can* do with its multimodal features.
+    // This is more about whether we *attempt* to process it.
+    const canProcess = isCapableModel && (isImage || isVideo || isAudio || isPdf || isDocument || isText || isStickerOrAnimation);
+
+    // Strategy for sending to Gemini:
+    // Prefer inline for images if they are small enough (not checked here, assumed for simplicity).
+    // Use File API for anything else supported by capable models (PDFs, videos, audio, documents, potentially larger images).
+    const useInlineData = isImage && isCapableModel; // Only images usually go inline.
+    const useFileAPI = isCapableModel && (isPdf || isVideo || isAudio || isDocument || isText || isStickerOrAnimation || (isImage && !useInlineData)); // Everything else goes via File API if model is capable.
+    
+    // `isSupported` describes if the bot has *any* strategy to handle this file type.
+    const isSupported = isImage || isVideo || isAudio || isPdf || isDocument || isText || isStickerOrAnimation;
+
+    const recommendation = !isCapableModel ? 'upgrade_model' : 'supported';
+
+    return {
+        canProcess: canProcess,         // Overall capability to send to Gemini.
+        useInlineData: useInlineData,   // Should attempt to send as Base64 inline.
+        useFileAPI: useFileAPI,         // Should attempt to upload to File API.
+        isSupported: isSupported,       // Does the bot *know* how to process this type?
+        recommendation: recommendation  // Feedback for user if model is not capable.
+    };
+}
+
 // --- Telegram Command Handlers ---
 
 // /start command: Welcomes the user and provides a list of available commands.
 bot.start((ctx) => {
-    ctx.reply('Привет! Я Telegram бот с интеграцией Gemini. Отправь мне текст или поддерживаемый файл (фото, PDF, видео, аудио, видео-сообщение, анимацию) с текстом или без, и я отвечу. Используй команды для настройки:\n' +
-              '/newchat - начать новый чат\n' +
-              '/setsysteminstruction <текст> - задать системные инструкции\n' +
-              '/toggletalkmode - включить/выключить "режим мышления"\n' +
-              '/toggleurlcontext - включить/выключить URL контекст (Инструмент)\n' +
-              '/togglegrounding - включить/выключить Заземление (Поиск Google, Инструмент)\n' +
-              '/setmodel <имя модели> - выбрать модель Gemini\n' +
-              '/showtokens - показать использованные токены\n' +
-              '/help - показать это сообщение еще раз');
+    ctx.reply('Привет! Я Telegram бот с интеграцией Gemini. Отправь мне текст или поддерживаемый файл (фото, видео, аудио, PDF, документы, анимации, стикеры) с текстом или без, и я отвечу. Используй команды для настройки:\n' +
+        '/newchat - начать новый чат\n' +
+        '/setsysteminstruction <текст> - задать системные инструкции\n' +
+        '/toggletalkmode - включить/выключить "режим мышления"\n' +
+        '/toggleurlcontext - включить/выключить URL контекст (Инструмент)\n' +
+        '/togglegrounding - включить/выключить Заземление (Поиск Google, Инструмент)\n' +
+        '/setmodel <имя модели> - выбрать модель Gemini\n' +
+        '/showtokens - показать использованные токены\n' +
+        '/supportedformats - показать поддерживаемые форматы файлов\n' +
+        '/help - показать это сообщение еще раз');
 });
 
 // /help command: Provides a concise list of all available commands.
 bot.help((ctx) => {
-     const modelsList = Object.keys(MODEL_ALIASES)
-            .map(alias => `${alias}: ${AVAILABLE_MODELS[MODEL_ALIASES[alias]]}`)
-            .join('\n');
+    const modelsList = Object.keys(MODEL_ALIASES)
+        .map(alias => `${alias}: ${AVAILABLE_MODELS[MODEL_ALIASES[alias]]}`)
+        .join('\n');
 
-     ctx.reply('Доступные команды:\n' +
+    ctx.reply('Доступные команды:\n' +
               '/start - приветственное сообщение\n' +
               '/newchat - начать новый чат\n' +
               '/setsysteminstruction <текст> - задать системные инструкции\n' +
@@ -267,7 +390,22 @@ bot.help((ctx) => {
               '/toggleurlcontext - включить/выключить URL контекст (Инструмент)\n' +
               '/togglegrounding - включить/выключить Заземление (Поиск Google, Инструмент)\n' +
               '/setmodel <псевдоним> - выбрать модель Gemini. Доступные модели (псевдоним: имя API):\n' + modelsList + '\n' +
-              '/showtokens - показать использованные токены');
+              '/showtokens - показать использованные токены\n' +
+              '/supportedformats - показать поддерживаемые форматы файлов');
+});
+
+// /supportedformats command: Shows supported file formats
+bot.command('supportedformats', (ctx) => {
+    ctx.reply('Поддерживаемые форматы файлов Gemini (при условии поддержки моделью):\n\n' +
+        '📷 **Изображения**: PNG, JPEG, GIF, WebP (включая анимированные), BMP, TIFF\n' +
+        '🎥 **Видео**: MP4, WebM, AVI, MOV, MKV, FLV (через File API)\n' +
+        '🎵 **Аудио**: MP3, OGG, WAV, FLAC, AAC, M4A (через File API)\n' +
+        '📄 **Документы**: PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX (через File API)\n' +
+        '📝 **Текст**: TXT, HTML, CSS, JS, JSON, XML (через File API)\n' +
+        '📦 **Архивы**: ZIP, 7Z, RAR, GZ (модель может попытаться извлечь текст)\n' +
+        '💬 **Голосовые сообщения Telegram**: OGG (через File API)\n' +
+        '🎭 **Стикеры Telegram**: WebP (через inline_data или File API, если анимированы)\n\n' +
+        'Для наилучшей обработки сложных файлов (видео, аудио, PDF) используйте модели `pro2.5` или `flash2.5`.');
 });
 
 // /newchat command: Clears the conversation history and resets system instructions for a fresh start.
@@ -372,21 +510,21 @@ bot.on('message', async (ctx) => {
         console.log(`MESSAGE_HANDLER: Received media with caption from ${ctx.from.id}: "${messageText}"`);
     }
 
-    // 2. Handle Media Files (photos, videos, documents, voice notes, video notes, audio, animations).
+    // 2. Handle Media Files (photos, videos, documents, voice notes, video notes, audio, animations, stickers).
     let fileId = null;                  // Telegram file_id.
-    let telegramProvidedMimeType = null; // MIME type reported by Telegram.
+    let telegramProvidedMimeType = null; // MIME type reported by Telegram (can be less accurate).
     let fileName = null;                // Suggested file name for upload.
+    let fileBuffer = null;              // Buffer to hold file data for MIME detection and upload.
 
-    // Determine fileId, mimeType, and fileName based on the specific message type.
+    // Determine fileId, original mimeType (from Telegram), and fileName based on the specific message type.
     if (ctx.message.photo) {
-        // For photos, get the file_id of the largest size.
         fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
         telegramProvidedMimeType = 'image/jpeg'; // Telegram often converts photos to JPEG.
         fileName = `${fileId}.jpg`;
         console.log(`MESSAGE_HANDLER: Received photo (file_id: ${fileId})`);
     } else if (ctx.message.video) {
         fileId = ctx.message.video.file_id;
-        telegramProvidedMimeType = ctx.message.video.mime_type || 'video/mp4'; // Default to mp4 if not specified.
+        telegramProvidedMimeType = ctx.message.video.mime_type || 'video/mp4';
         fileName = ctx.message.video.file_name || `${fileId}.mp4`;
         console.log(`MESSAGE_HANDLER: Received video (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
     } else if (ctx.message.document) {
@@ -396,121 +534,114 @@ bot.on('message', async (ctx) => {
         console.log(`MESSAGE_HANDLER: Received document (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType}, file_name: ${fileName})`);
     } else if (ctx.message.voice) {
         fileId = ctx.message.voice.file_id;
-        telegramProvidedMimeType = ctx.message.voice.mime_type || 'audio/ogg'; // Voice notes are commonly Ogg Opus.
+        telegramProvidedMimeType = ctx.message.voice.mime_type || 'audio/ogg';
         fileName = `${fileId}.ogg`;
         console.log(`MESSAGE_HANDLER: Received voice message (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
     } else if (ctx.message.video_note) {
         fileId = ctx.message.video_note.file_id;
-        telegramProvidedMimeType = ctx.message.video_note.mime_type || 'video/mp4'; // Video notes are typically mp4.
+        telegramProvidedMimeType = ctx.message.video_note.mime_type || 'video/mp4';
         fileName = `${fileId}.mp4`;
         console.log(`MESSAGE_HANDLER: Received video note (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
-    } else if (ctx.message.animation) { // ADDED: Handle animation files
-        fileId = ctx.message.animation.file_id;
-        telegramProvidedMimeType = ctx.message.animation.mime_type || 'video/mp4'; // Animations can be GIF/MP4.
-        fileName = ctx.message.animation.file_name || `${fileId}.gif`; // Use .gif as a common animation extension.
-        console.log(`MESSAGE_HANDLER: Received animation (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
-    } else if (ctx.message.audio) { // ADDED: Handle audio files (non-voice)
+    } else if (ctx.message.audio) { // NEW: Audio file handling
         fileId = ctx.message.audio.file_id;
-        telegramProvidedMimeType = ctx.message.audio.mime_type || 'audio/mpeg'; // Audio can be MP3/M4A.
-        fileName = ctx.message.audio.file_name || `${fileId}.mp3`; // Use .mp3 as a common audio extension.
-        console.log(`MESSAGE_HANDLER: Received audio (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
+        telegramProvidedMimeType = ctx.message.audio.mime_type || 'audio/mpeg'; // Common audio MIME type
+        fileName = ctx.message.audio.file_name || `${fileId}.mp3`;
+        console.log(`MESSAGE_HANDLER: Received audio (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType}, file_name: ${fileName})`);
+    } else if (ctx.message.animation) { // NEW: Animation file handling
+        fileId = ctx.message.animation.file_id;
+        telegramProvidedMimeType = ctx.message.animation.mime_type || 'video/mp4'; // Animations can be MP4/GIF
+        fileName = ctx.message.animation.file_name || `${fileId}.mp4`;
+        console.log(`MESSAGE_HANDLER: Received animation (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType}, file_name: ${fileName})`);
+    } else if (ctx.message.sticker) { // NEW: Sticker handling (often WebP)
+        // Note: Stickers are typically WebP or animated. For static stickers, can be inline.
+        // Animated stickers often require File API.
+        fileId = ctx.message.sticker.file_id;
+        telegramProvidedMimeType = ctx.message.sticker.mime_type || 'image/webp'; // Stickers are often WebP
+        fileName = `${fileId}.webp`; // Assume WebP for sticker
+        console.log(`MESSAGE_HANDLER: Received sticker (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
+        if (ctx.message.sticker.is_animated || ctx.message.sticker.is_video) {
+            console.log(`MESSAGE_HANDLER: Animated/Video sticker detected.`);
+            // These might be better handled by File API for models that support video/animation.
+        }
     }
-    // TODO: Extend this logic to support other media types like stickers if needed (if Gemini supports them).
 
     // If a file ID was found, proceed to download and process it for Gemini.
     if (fileId) {
-        const currentModel = ctx.session.model;
-        // Check if the current model is explicitly listed as capable for File API.
-        const isCapableModel = CAPABLE_FILE_MODELS.includes(currentModel);
+        // Download the file buffer once for MIME detection and subsequent upload.
+        fileBuffer = await downloadFileBuffer(fileId);
+        if (!fileBuffer) {
+            console.warn(`FILE_PROCESSING_WARNING: Failed to download file buffer for ${fileId}. Skipping processing.`);
+            currentUserMessageParts.push({ text: `[Не удалось скачать файл из Telegram.]` });
+        } else {
+            // Use the enhanced MIME type detection with the downloaded buffer.
+            const detectedMimeType = detectMimeType(fileBuffer, fileName || '');
+            console.log(`FILE_PROCESSING: Original Telegram MIME: ${telegramProvidedMimeType}, Detected MIME: ${detectedMimeType}`);
+            telegramProvidedMimeType = detectedMimeType; // Use the more accurate detected MIME type.
 
-        const isPdf = telegramProvidedMimeType === 'application/pdf';
-        const isImage = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('image/');
-        const isVideo = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('video/');
-        const isAudio = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('audio/');
-        const isAnimation = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('video/') && (telegramProvidedMimeType.includes('gif') || ctx.message.animation); // Explicitly check animation type
+            const currentModel = ctx.session.model;
+            const strategy = getFileProcessingStrategy(telegramProvidedMimeType, currentModel);
 
-        // --- DEBUGGING LOGS FOR FILE PROCESSING DECISION ---
-        console.log(`DEBUG_FILE_LOGIC: currentModel: "${currentModel}"`);
-        console.log(`DEBUG_FILE_LOGIC: telegramProvidedMimeType: "${telegramProvidedMimeType}"`);
-        console.log(`DEBUG_FILE_LOGIC: isPdf: ${isPdf}, isImage: ${isImage}, isVideo: ${isVideo}, isAudio: ${isAudio}, isAnimation: ${isAnimation}`);
-        console.log(`DEBUG_FILE_LOGIC: isCapableModel (from CAPABLE_FILE_MODELS): ${isCapableModel}`);
-        // --- END DEBUGGING LOGS ---
+            // --- DEBUGGING LOGS FOR FILE PROCESSING DECISION ---
+            console.log(`DEBUG_FILE_LOGIC: currentModel: "${currentModel}"`);
+            console.log(`DEBUG_FILE_LOGIC: telegramProvidedMimeType (final): "${telegramProvidedMimeType}"`);
+            console.log(`DEBUG_FILE_LOGIC: Strategy: ${JSON.stringify(strategy)}`);
+            // --- END DEBUGGING LOGS ---
 
-        // Decide whether to use `inline_data` (Base64) or Gemini's File API.
-        // `inline_data` is typically for smaller images.
-        const shouldUseInlineData = isImage;
-        // File API is used for larger files (PDFs, videos, audio, animations) and requires supported models.
-        // Updated `shouldUseFileAPI` to include `isAnimation`
-        const shouldUseFileAPI = isCapableModel && (isPdf || isVideo || isAudio || isAnimation || (isImage && !shouldUseInlineData)); 
+            if (strategy.canProcess) {
+                if (strategy.useInlineData) {
+                    console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) as inline image data...`);
+                    try {
+                        const base64Data = fileBuffer.toString('base64');
+                        currentUserMessageParts.push({
+                            inline_data: {
+                                mime_type: telegramProvidedMimeType, // Use the accurately detected MIME type.
+                                data: base64Data
+                            }
+                        });
+                        console.log(`FILE_PROCESSING: Added inline data part (MIME: ${telegramProvidedMimeType}).`);
+                    } catch (error) {
+                        console.error('FILE_PROCESSING_ERROR: Error converting file to Base64 for inline data:', error);
+                        currentUserMessageParts.push({ text: `[Произошла ошибка при обработке отправленного файла (${telegramProvidedMimeType}) как встроенного изображения.]` });
+                    }
+                } else if (strategy.useFileAPI) {
+                    console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) using Gemini File API...`);
+                    const uploadedFile = await uploadFileToGemini(fileBuffer, telegramProvidedMimeType, fileName); // Upload to Gemini File API
 
-        console.log(`DEBUG_FILE_LOGIC: shouldUseInlineData: ${shouldUseInlineData}`);
-        console.log(`DEBUG_FILE_LOGIC: shouldUseFileAPI: ${shouldUseFileAPI}`);
-
-
-        if (shouldUseInlineData) {
-            console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) as inline image data...`);
-            try {
-                const fileData = await downloadFileAsBase64(fileId); // Download as Base64 for inline.
-
-                if (fileData && fileData.data && fileData.mimeType.startsWith('image/')) {
-                    currentUserMessageParts.push({
-                        inline_data: {
-                            mime_type: fileData.mimeType, // Use the detected MIME type for inline data.
-                            data: fileData.data
-                        }
-                    });
-                    console.log(`FILE_PROCESSING: Added image part (MIME: ${fileData.mimeType}) as inline data.`);
-                } else {
-                    console.warn(`FILE_PROCESSING_WARNING: Could not process file ${fileId} as inline image. Detected MIME: ${fileData ? fileData.mimeType : 'N/A'}.`);
-                    currentUserMessageParts.push({ text: `[Не удалось обработать отправленное изображение (${telegramProvidedMimeType}) как встроенное изображение.]` });
-                }
-            } catch (error) {
-                console.error('FILE_PROCESSING_ERROR: Error processing file for inline data:', error);
-                currentUserMessageParts.push({ text: `[Произошла ошибка при обработке отправленного файла (${telegramProvidedMimeType}).]` });
-            }
-        } else if (shouldUseFileAPI) {
-            console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) using Gemini File API...`);
-            const fileBuffer = await downloadFileBuffer(fileId); // Скачиваем файл как буфер
-
-            if (fileBuffer) {
-                const uploadedFile = await uploadFileToGemini(fileBuffer, telegramProvidedMimeType, fileName); // Загружаем в Gemini File API
-
-                if (uploadedFile && uploadedFile.uri) {
-                    // Add a `fileData` part, referencing the uploaded file's URI in Gemini.
-                    currentUserMessageParts.push({
-                        fileData: {
-                            mime_type: telegramProvidedMimeType, // Use Telegram's provided MIME type for File API.
-                            uri: uploadedFile.uri                 // URI format: 'files/FID'.
-                        }
-                    });
-                    console.log(`FILE_PROCESSING: Added fileData part (URI: ${uploadedFile.uri}) to prompt parts.`);
-                    // TODO: Implement a strategy to delete files from File API after use (e.g., after the conversation or a set time).
-                } else {
-                    console.warn(`FILE_PROCESSING_WARNING: Failed to upload file ${fileId} (${telegramProvidedMimeType}) to Gemini File API.`);
-                    currentUserMessageParts.push({ text: `[Не удалось загрузить файл (${telegramProvidedMimeType}) в Gemini File API.]` });
+                    if (uploadedFile && uploadedFile.uri) {
+                        currentUserMessageParts.push({
+                            fileData: {
+                                mime_type: telegramProvidedMimeType, // Use Telegram's provided MIME type for File API.
+                                uri: uploadedFile.uri                 // URI format: 'files/FID'.
+                            }
+                        });
+                        console.log(`FILE_PROCESSING: Added fileData part (URI: ${uploadedFile.uri}) to prompt parts.`);
+                        // TODO: Implement a strategy to delete files from File API after use (e.g., after the conversation or a set time).
+                    } else {
+                        console.warn(`FILE_PROCESSING_WARNING: Failed to upload file ${fileId} (${telegramProvidedMimeType}) to Gemini File API.`);
+                        currentUserMessageParts.push({ text: `[Не удалось загрузить файл (${telegramProvidedMimeType}) в Gemini File API.]` });
+                    }
                 }
             } else {
-                console.warn(`FILE_PROCESSING_WARNING: Failed to download file buffer for ${fileId} (${telegramProvidedMimeType}).`);
-                currentUserMessageParts.push({ text: `[Не удалось скачать файл (${telegramProvidedMimeType}) из Telegram.]` });
+                // File type is not supported by the current model or overall strategy.
+                console.warn(`FILE_PROCESSING_WARNING: File type "${telegramProvidedMimeType}" is not supported for processing with the selected model (${currentModel}) or via current methods.`);
+                let userMessage = `[Файл типа ${telegramProvidedMimeType} не поддерживается выбранной моделью (${currentModel}) или методом обработки.]`;
+                if (strategy.recommendation === 'upgrade_model') {
+                    userMessage += ` Для лучшей поддержки попробуйте выбрать более мощную модель, например, 'pro2.5' или 'flash2.5'.`;
+                }
+                currentUserMessageParts.push({ text: userMessage });
             }
-        } else {
-            // File type is not supported for inline or File API with the current model.
-            // This is the branch that was previously hit for PDF/Audio.
-            console.warn(`FILE_PROCESSING_WARNING: File type "${telegramProvidedMimeType}" is not supported for processing with the selected model (${currentModel}) or via current methods (inline/File API).`);
-            currentUserMessageParts.push({ text: `[Файл типа ${telegramProvidedMimeType} не поддерживается выбранной моделью (${currentModel}) или методом обработки.]` });
         }
     } // End of file processing block.
 
     // 3. Final check for parts to send to Gemini.
     // If after processing text and file, `currentUserMessageParts` is empty, it means
-    // the message type was unhandled (e.g., sticker, location).
+    // the message type was unhandled (e.g., location, contact, poll).
     if (currentUserMessageParts.length === 0) {
         console.warn("GEMINI_CALL_SKIPPED: Current message parts are empty after processing.");
         // Reply to the user if the message type wasn't handled at all.
         if (!ctx.message.text && !ctx.message.caption && !fileId) {
             console.log(`MESSAGE_HANDLER: Received completely unhandled message type. ctx.message:`, ctx.message);
-            // Updated message to reflect new capabilities.
-            ctx.reply('Извините, я пока умею обрабатывать для ответа через Gemini только текст, фото, видео, документы (включая PDF), аудио, голосовые сообщения, видео-сообщения и анимации (с текстом или без), при условии поддержки выбранной моделью.');
+            ctx.reply('Извините, я пока умею обрабатывать для ответа через Gemini только текст, фото, видео, документы (включая PDF), голосовые сообщения, видео-сообщения, аудио, анимации и стикеры (при условии поддержки выбранной моделью).');
         } else {
             // This case should ideally not be reached if fileId was processed,
             // but as a fallback for other processing failures.
@@ -577,7 +708,7 @@ bot.on('message', async (ctx) => {
             contents: contents, // Full conversation history + current user message.
             tools: tools.length > 0 ? tools : undefined, // Tools to enable for this generation.
             systemInstruction: systemInstructionContent, // Correct parameter for system instructions.
-            // Safety settings are TEMPORARILY REMOVED to diagnose the previous 400 Bad Request issue.
+            // Safety settings are TEMPORARILY REMOVED to resolve 400 Bad Request error.
             // Re-introduce carefully after confirming basic functionality.
             /* safetySettings: [
                 { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
