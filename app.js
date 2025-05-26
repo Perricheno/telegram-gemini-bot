@@ -61,9 +61,9 @@ const bot = new Telegraf(telegramToken);
 // Initialize Google Generative AI client.
 const genAI = new GoogleGenerativeAI(geminiApiKey);
 
-// Correct way to get the FileService client for uploading files to Gemini.
-// This service does not require a specific model instance.
-const fileService = genAI.fileService;
+// Access the Files API client from the GoogleGenerativeAI instance.
+// This is used for uploading and managing files with Gemini.
+const fileService = genAI.files; // Corrected: Use genAI.files, which provides the FilesAPI instance.
 
 // --- Telegraf Session Management ---
 // Using Telegraf's built-in session middleware.
