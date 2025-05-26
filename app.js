@@ -116,6 +116,15 @@ const MODEL_ALIASES = {
     'pro2.5': 'pro-05-06'      // Alias for the latest 2.5 Pro preview.
 };
 
+// **FIXED**: Defined explicitly capable models for File API.
+const CAPABLE_FILE_MODELS = [
+    'gemini-2.5-pro-preview-05-06',
+    'gemini-2.5-flash-preview-05-20',
+    'gemini-2.5-flash-preview-04-17',
+    'gemini-2.0-flash', // Explicitly included for File API attempt.
+    'gemini-2.0-flash-lite' // Explicitly included for File API attempt.
+];
+
 // --- Helper Functions for File Handling ---
 
 /**
@@ -322,8 +331,8 @@ bot.command('setmodel', (ctx) => {
             replyText += `\nВнимание: Это превью-модель, ее поведение может меняться.`;
         }
         // General warning if a less capable model is selected
-        if (!AVAILABLE_MODELS[alias].includes('pro-05-06') && !AVAILABLE_MODELS[alias].includes('flash-05-20') && !AVAILABLE_MODELS[alias].includes('flash-04-17')) {
-             replyText += `\nДля наилучшей поддержки мультимодальных данных (PDF, видео, аудио) рекомендуется использовать 'pro2.5', 'flash2.5' или '04-17'.`;
+        if (!CAPABLE_FILE_MODELS.includes(AVAILABLE_MODELS[alias])) {
+             replyText += `\nЭта модель (${AVAILABLE_MODELS[alias]}) может иметь ограниченную поддержку мультимодальных данных (PDF, видео, аудио). Для наилучшей поддержки рекомендуется использовать 'pro2.5', 'flash2.5' или '04-17'.`;
         }
 
         ctx.reply(replyText);
@@ -401,20 +410,30 @@ bot.on('message', async (ctx) => {
     // If a file ID was found, proceed to download and process it for Gemini.
     if (fileId) {
         const currentModel = ctx.session.model;
-        // Determine if the current model is one of the capable ones (Pro or any 2.x Flash).
-        // **FIXED LOGIC**: Now includes gemini-2.0-flash and gemini-2.0-flash-lite in "capable" check.
-        const isCapableModel = currentModel.includes('pro-05-06') || currentModel.includes('flash-05-20') || currentModel.includes('flash-04-17') || currentModel.includes('2.0-flash');
+        // Check if the current model is explicitly listed as capable for File API.
+        const isCapableModel = CAPABLE_FILE_MODELS.includes(currentModel);
 
         const isPdf = telegramProvidedMimeType === 'application/pdf';
         const isImage = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('image/');
         const isVideo = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('video/');
         const isAudio = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('audio/');
 
+        // --- DEBUGGING LOGS FOR FILE PROCESSING DECISION ---
+        console.log(`DEBUG_FILE_LOGIC: currentModel: "${currentModel}"`);
+        console.log(`DEBUG_FILE_LOGIC: telegramProvidedMimeType: "${telegramProvidedMimeType}"`);
+        console.log(`DEBUG_FILE_LOGIC: isPdf: ${isPdf}, isImage: ${isImage}, isVideo: ${isVideo}, isAudio: ${isAudio}`);
+        console.log(`DEBUG_FILE_LOGIC: isCapableModel (from CAPABLE_FILE_MODELS): ${isCapableModel}`);
+        // --- END DEBUGGING LOGS ---
+
         // Decide whether to use `inline_data` (Base64) or Gemini's File API.
         // `inline_data` is typically for smaller images.
         const shouldUseInlineData = isImage;
         // File API is used for larger files (PDFs, videos, audio) and requires supported models.
         const shouldUseFileAPI = isCapableModel && (isPdf || isVideo || isAudio || (isImage && !shouldUseInlineData));
+
+        console.log(`DEBUG_FILE_LOGIC: shouldUseInlineData: ${shouldUseInlineData}`);
+        console.log(`DEBUG_FILE_LOGIC: shouldUseFileAPI: ${shouldUseFileAPI}`);
+
 
         if (shouldUseInlineData) {
             console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) as inline image data...`);
@@ -464,6 +483,7 @@ bot.on('message', async (ctx) => {
             }
         } else {
             // File type is not supported for inline or File API with the current model.
+            // This is the branch that was previously hit for PDF/Audio.
             console.warn(`FILE_PROCESSING_WARNING: File type "${telegramProvidedMimeType}" is not supported for processing with the selected model (${currentModel}) or via current methods (inline/File API).`);
             currentUserMessageParts.push({ text: `[Файл типа ${telegramProvidedMimeType} не поддерживается выбранной моделью (${currentModel}) или методом обработки.]` });
         }
@@ -544,8 +564,15 @@ bot.on('message', async (ctx) => {
             contents: contents, // Full conversation history + current user message.
             tools: tools.length > 0 ? tools : undefined, // Tools to enable for this generation.
             systemInstruction: systemInstructionContent, // Correct parameter for system instructions.
-            // **FIXED**: Removed all safetySettings temporarily to resolve 400 Bad Request error.
-            // safetySettings: [ ... ], // Re-introduce only standard categories after testing.
+            // Safety settings are TEMPORARILY REMOVED to diagnose the previous 400 Bad Request issue.
+            // Re-introduce carefully after confirming basic functionality.
+            /* safetySettings: [
+                { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+                { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                { category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold: HarmBlockThreshold.BLOCK_NONE },
+            ], */
             generationConfig: {
                 // Future generation parameters (e.g., temperature, top_p) could be added here.
             }
