@@ -74,6 +74,13 @@ const fileService = genAI.fileService;
 // Example: https://telegraf.js.org/#/middlewares?id=session
 bot.use(session({ property: 'session' }));
 
+// --- Constants ---
+const MAX_HISTORY_MESSAGES = 20;
+const GEMINI_UPLOAD_MAX_ATTEMPTS = 3;
+const GEMINI_UPLOAD_RETRY_DELAY_BASE_MS = 1500;
+const GEMINI_POLLING_MAX_ATTEMPTS = 12;
+const GEMINI_POLLING_INTERVAL_MS = 5000;
+
 // Middleware to initialize default session settings if not present.
 bot.use((ctx, next) => {
     // Initialize session if it's new or corrupted.
@@ -145,6 +152,15 @@ function detectMimeType(buffer, fileName = '') {
     const signature = buffer.subarray(0, 16).toString('hex').toUpperCase(); // Read first 16 bytes for signature.
     const ext = fileName.toLowerCase().split('.').pop() || ''; // Get file extension.
 
+    // Simple extension-based mapping for common text/data types
+    const extensionMap = {
+        'txt': 'text/plain', 'html': 'text/html', 'htm': 'text/html', 'css': 'text/css',
+        'js': 'application/javascript', 'json': 'application/json', 'xml': 'application/xml',
+        'md': 'text/markdown', 'csv': 'text/csv', 'rtf': 'text/rtf', 'py': 'text/x-python'
+    };
+
+    if (ext && extensionMap[ext]) return extensionMap[ext];
+
     // Image formats (common signatures)
     if (signature.startsWith('89504E47')) return 'image/png';
     if (signature.startsWith('FFD8FF')) return 'image/jpeg';
@@ -183,18 +199,6 @@ function detectMimeType(buffer, fileName = '') {
         if (ext === 'ppt') return 'application/vnd.ms-powerpoint';
         return 'application/x-ole-storage'; // Generic OLE
     }
-
-    // Text formats (common extensions)
-    if (ext === 'txt') return 'text/plain';
-    if (ext === 'html' || ext === 'htm') return 'text/html';
-    if (ext === 'css') return 'text/css';
-    if (ext === 'js') return 'application/javascript';
-    if (ext === 'json') return 'application/json';
-    if (ext === 'xml') return 'application/xml';
-    if (ext === 'md') return 'text/markdown';
-    if (ext === 'csv') return 'text/csv';
-    if (ext === 'rtf') return 'text/rtf';
-    if (ext === 'py') return 'text/x-python';
 
     // Archive formats (common signatures/extensions)
     if (signature.startsWith('1F8B08') || ext === 'gz') return 'application/gzip'; // Gzip magic number
@@ -245,7 +249,7 @@ async function downloadFileAsBase64(fileId) {
 
         const buffer = Buffer.from(response.data);
         // Use the enhanced detectMimeType function here.
-        const mimeType = detectMimeType(buffer); 
+        const mimeType = detectMimeType(buffer, fileId); // Pass fileName (or fileId as proxy) for extension hint
 
         const base64 = buffer.toString('base64');
         return { data: base64, mimeType: mimeType };
@@ -272,7 +276,7 @@ async function uploadFileToGemini(buffer, mimeType, fileName) {
 
     let initialUploadResponse;
     let lastInitialUploadError = null;
-    const maxUploadAttempts = 3; // Number of attempts for the initial file upload.
+    const maxUploadAttempts = GEMINI_UPLOAD_MAX_ATTEMPTS;
     let currentUploadAttempt = 0;
 
     // --- 1. Initial File Upload with Retries ---
@@ -294,7 +298,7 @@ async function uploadFileToGemini(buffer, mimeType, fileName) {
                 console.warn('GEMINI_API_ERROR_DETAILS (upload attempt):', JSON.stringify(error.response.data));
             }
             if (currentUploadAttempt < maxUploadAttempts) {
-                const delay = 1500 * currentUploadAttempt; // Basic exponential backoff.
+                const delay = GEMINI_UPLOAD_RETRY_DELAY_BASE_MS * currentUploadAttempt; // Basic exponential backoff.
                 console.log(`GEMINI_FILE_UPLOAD: Retrying in ${delay / 1000}s...`);
                 await new Promise(resolve => setTimeout(resolve, delay));
             }
@@ -315,9 +319,9 @@ async function uploadFileToGemini(buffer, mimeType, fileName) {
         if (file.state === 'PROCESSING') {
             console.log(`GEMINI_FILE_PROCESSING: File "${file.name}" is PROCESSING. Starting polling...`);
             let attempts = 0;
-            const maxAttempts = 12; // Poll for up to 60 seconds (12 * 5s)
+            const maxAttempts = GEMINI_POLLING_MAX_ATTEMPTS; 
             while (file.state === 'PROCESSING' && attempts < maxAttempts) {
-                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+                await new Promise(resolve => setTimeout(resolve, GEMINI_POLLING_INTERVAL_MS)); 
                 const getFileResponse = await fileService.getFile(file.name); // Fetch updated file status
                 file = getFileResponse.file; // Correctly access the file object
                 attempts++;
@@ -532,10 +536,7 @@ bot.command('setmodel', (ctx) => {
     if (alias && AVAILABLE_MODELS[alias]) {
         ctx.session.model = AVAILABLE_MODELS[alias];
         let replyText = `Модель установлена на ${ctx.session.model}.`;
-        // Provide warnings/info based on selected model's capabilities.
-        if (alias === 'image-gen-2.0') { 
-            replyText += `\nВнимание: Эта модель предназначена ТОЛЬКО для генерации изображений и может не работать для диалога или обработки входящих медиа.`;
-        } else if (alias.includes('preview')) {
+        if (alias.includes('preview')) {
             replyText += `\nВнимание: Это превью-модель, ее поведение может меняться.`;
         }
         // General warning if a less capable model is selected
@@ -556,37 +557,29 @@ bot.command('showtokens', (ctx) => {
     ctx.reply(`Общее количество использованных токенов (приблизительно): ${ctx.session.totalTokens}.`);
 });
 
-// --- Main Message Handler (Gemini Interaction Logic) ---
-// This handler listens for all message types and orchestrates the interaction with Gemini.
-bot.on('message', async (ctx) => {
-    // Ignore messages that are commands (these are handled by specific command handlers).
-    if (ctx.message.text && ctx.message.text.startsWith('/')) {
-        console.log(`MESSAGE_HANDLER: Ignoring message as it appears to be a command: ${ctx.message.text}`);
-        return;
-    }
+/**
+ * Extracts text content and media file information from a Telegram message context.
+ * @param {object} ctx - The Telegraf context object.
+ * @returns {Promise<{text: string|null, fileId: string|null, telegramMimeType: string|null, fileName: string|null, initialParts: Array<object>}>}
+ */
+async function extractMessageData(ctx) {
+    let messageText = null;
+    const initialParts = [];
+    let fileId = null;
+    let telegramMimeType = null;
+    let fileName = null;
 
-    let messageText = null;             // Stores text content from the message (either text or caption).
-    const currentUserMessageParts = []; // Array to build the 'parts' for the current user turn for Gemini API.
-
-    // 1. Extract Text Content (from message.text or message.caption).
     if (ctx.message.text) {
         messageText = ctx.message.text;
-        currentUserMessageParts.push({ text: messageText });
+        initialParts.push({ text: messageText });
         console.log(`MESSAGE_HANDLER: Received text message from ${ctx.from.id}: "${messageText}"`);
     } else if (ctx.message.caption) {
         // This is a media message with a text caption.
         messageText = ctx.message.caption;
-        currentUserMessageParts.push({ text: messageText });
+        initialParts.push({ text: messageText });
         console.log(`MESSAGE_HANDLER: Received media with caption from ${ctx.from.id}: "${messageText}"`);
     }
 
-    // 2. Handle Media Files (photos, videos, documents, voice notes, video notes, audio, animations, stickers).
-    let fileId = null;                  // Telegram file_id.
-    let telegramProvidedMimeType = null; // MIME type reported by Telegram (can be less accurate).
-    let fileName = null;                // Suggested file name for upload.
-    let fileBuffer = null;              // Buffer to hold file data for MIME detection and upload.
-
-    // Determine fileId, original mimeType (from Telegram), and fileName based on the specific message type.
     if (ctx.message.photo) {
         fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
         telegramProvidedMimeType = 'image/jpeg'; // Telegram often converts photos to JPEG.
@@ -635,83 +628,102 @@ bot.on('message', async (ctx) => {
         }
     }
 
-    // If a file ID was found, proceed to download and process it for Gemini.
-    if (fileId) {
-        // Download the file buffer once for MIME detection and subsequent upload.
-        fileBuffer = await downloadFileBuffer(fileId);
-        if (!fileBuffer) {
-            console.warn(`FILE_PROCESSING_WARNING: Failed to download file buffer for ${fileId}. Skipping processing.`);
-            currentUserMessageParts.push({ text: `[Не удалось скачать файл из Telegram.]` });
-        } else {
-            // Use the enhanced MIME type detection with the downloaded buffer.
-            const detectedMimeType = detectMimeType(fileBuffer, fileName || '');
-            console.log(`FILE_PROCESSING: Original Telegram MIME: ${telegramProvidedMimeType}, Detected MIME: ${detectedMimeType}`);
-            telegramProvidedMimeType = detectedMimeType; // Use the more accurate detected MIME type.
+    return { text: messageText, fileId, telegramMimeType, fileName, initialParts };
+}
 
-            const currentModel = ctx.session.model;
-            const strategy = getFileProcessingStrategy(telegramProvidedMimeType, currentModel);
+/**
+ * Processes a media file: downloads, detects MIME, and prepares it for Gemini.
+ * @param {string} fileId - Telegram file ID.
+ * @param {string} initialTelegramMimeType - MIME type provided by Telegram.
+ * @param {string} fileName - Original or derived file name.
+ * @param {string} currentModel - Currently selected Gemini model.
+ * @returns {Promise<{success: boolean, part: object|null, error: string|null}>}
+ */
+async function processMediaFile(fileId, initialTelegramMimeType, fileName, currentModel) {
+    const fileBuffer = await downloadFileBuffer(fileId);
+    if (!fileBuffer) {
+        console.warn(`FILE_PROCESSING_WARNING: Failed to download file buffer for ${fileId}.`);
+        return { success: false, part: { text: `[Не удалось скачать файл из Telegram.]` }, error: 'download_failed' };
+    }
 
-            // --- DEBUGGING LOGS FOR FILE PROCESSING DECISION ---
-            console.log(`DEBUG_FILE_LOGIC: currentModel: "${currentModel}"`);
-            console.log(`DEBUG_FILE_LOGIC: telegramProvidedMimeType (final): "${telegramProvidedMimeType}"`);
-            console.log(`DEBUG_FILE_LOGIC: Strategy: ${JSON.stringify(strategy)}`);
-            // --- END DEBUGGING LOGS ---
+    const detectedMimeType = detectMimeType(fileBuffer, fileName || '');
+    console.log(`FILE_PROCESSING: Original Telegram MIME: ${initialTelegramMimeType}, Detected MIME: ${detectedMimeType}`);
+    const finalMimeType = detectedMimeType; // Use the more accurate detected MIME type.
 
-            if (strategy.canProcess) {
-                if (strategy.useInlineData) {
-                    console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) as inline image data...`);
-                    try {
-                        const base64Data = fileBuffer.toString('base64');
-                        currentUserMessageParts.push({
-                            inline_data: {
-                                mime_type: telegramProvidedMimeType, // Use the accurately detected MIME type.
-                                data: base64Data
-                            }
-                        });
-                        console.log(`FILE_PROCESSING: Added inline data part (MIME: ${telegramProvidedMimeType}).`);
-                    } catch (error) {
-                        console.error('FILE_PROCESSING_ERROR: Error converting file to Base64 for inline data:', error);
-                        currentUserMessageParts.push({ text: `[Произошла ошибка при обработке отправленного файла (${telegramProvidedMimeType}) как встроенного изображения.]` });
-                    }
-                } else if (strategy.useFileAPI) {
-                    console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) using Gemini File API...`);
-                    const uploadResult = await uploadFileToGemini(fileBuffer, telegramProvidedMimeType, fileName); // Upload to Gemini File API
+    const strategy = getFileProcessingStrategy(finalMimeType, currentModel);
 
-                    if (uploadResult.success && uploadResult.file) {
-                        const geminiFile = uploadResult.file;
-                        currentUserMessageParts.push({
-                            fileData: {
-                                mime_type: geminiFile.mimeType, // Use MIME type confirmed by Gemini.
-                                uri: geminiFile.name            // Use the resource name (e.g., 'files/your-file-id').
-                            }
-                        });
-                        console.log(`FILE_PROCESSING: Added fileData part (Name: ${geminiFile.name}, MIME: ${geminiFile.mimeType}) to prompt parts.`);
-                        // TODO: Implement a strategy to delete files from File API (using geminiFile.name) after use.
-                    } else {
-                        const errorReason = uploadResult.error || 'unknown_error';
-                        const errorDetails = uploadResult.details || 'No additional details';
-                        console.warn(`FILE_PROCESSING_WARNING: Failed to upload/process file ${fileId} (${telegramProvidedMimeType}) for Gemini File API. Reason: ${errorReason}, Details: ${errorDetails}`);
-                        currentUserMessageParts.push({ text: `[Не удалось обработать файл (${telegramProvidedMimeType}) для Gemini File API. Причина: ${errorReason}.]` });
-                    }
-                }
+    console.log(`DEBUG_FILE_LOGIC: currentModel: "${currentModel}"`);
+    console.log(`DEBUG_FILE_LOGIC: finalMimeType: "${finalMimeType}"`);
+    console.log(`DEBUG_FILE_LOGIC: Strategy: ${JSON.stringify(strategy)}`);
+
+    if (strategy.canProcess) {
+        if (strategy.useInlineData) {
+            console.log(`FILE_PROCESSING: Processing file ${fileId} (${finalMimeType}) as inline image data...`);
+            try {
+                const base64Data = fileBuffer.toString('base64');
+                return { success: true, part: { inline_data: { mime_type: finalMimeType, data: base64Data } }, error: null };
+            } catch (error) {
+                console.error('FILE_PROCESSING_ERROR: Error converting file to Base64 for inline data:', error);
+                return { success: false, part: { text: `[Произошла ошибка при обработке файла (${finalMimeType}) как встроенного изображения.]` }, error: 'base64_conversion_failed' };
+            }
+        } else if (strategy.useFileAPI) {
+            console.log(`FILE_PROCESSING: Processing file ${fileId} (${finalMimeType}) using Gemini File API...`);
+            const uploadResult = await uploadFileToGemini(fileBuffer, finalMimeType, fileName);
+
+            if (uploadResult.success && uploadResult.file) {
+                const geminiFile = uploadResult.file;
+                return { success: true, part: { fileData: { mime_type: geminiFile.mimeType, uri: geminiFile.name } }, error: null };
             } else {
-                // File type is not supported by the current model or overall strategy.
-                console.warn(`FILE_PROCESSING_WARNING: File type "${telegramProvidedMimeType}" is not supported for processing with the selected model (${currentModel}) or via current methods.`);
-                let userMessage = `[Файл типа ${telegramProvidedMimeType} не поддерживается выбранной моделью (${currentModel}) или методом обработки.]`;
-                if (strategy.recommendation === 'upgrade_model') {
-                    userMessage += ` Для лучшей поддержки попробуйте выбрать более мощную модель, например, 'pro2.5' или 'flash2.5'.`;
-                }
-                currentUserMessageParts.push({ text: userMessage });
+                const errorReason = uploadResult.error || 'unknown_error';
+                console.warn(`FILE_PROCESSING_WARNING: Failed to upload/process file ${fileId} (${finalMimeType}) for Gemini File API. Reason: ${errorReason}`);
+                return { success: false, part: { text: `[Не удалось обработать файл (${finalMimeType}) для Gemini File API. Причина: ${errorReason}.]` }, error: `gemini_upload_failed: ${errorReason}` };
             }
         }
-    } // End of file processing block.
+    } else {
+        console.warn(`FILE_PROCESSING_WARNING: File type "${finalMimeType}" is not supported for processing with model (${currentModel}).`);
+        let userMessage = `[Файл типа ${finalMimeType} не поддерживается выбранной моделью (${currentModel}).]`;
+        if (strategy.recommendation === 'upgrade_model') {
+            userMessage += ` Попробуйте 'pro2.5' или 'flash2.5'.`;
+        }
+        return { success: false, part: { text: userMessage }, error: 'unsupported_type_or_model' };
+    }
+    // Should not be reached if logic is correct
+    return { success: false, part: { text: `[Неизвестная ошибка обработки файла ${finalMimeType}]`}, error: 'unknown_file_processing_error'};
+}
+
+
+// --- Main Message Handler (Gemini Interaction Logic) ---
+// This handler listens for all message types and orchestrates the interaction with Gemini.
+bot.on('message', async (ctx) => {
+    // Ignore messages that are commands (these are handled by specific command handlers).
+    if (ctx.message.text && ctx.message.text.startsWith('/')) {
+        console.log(`MESSAGE_HANDLER: Ignoring command: ${ctx.message.text}`);
+        return;
+    }
+
+    const currentUserMessageParts = [];
+
+    // 1. Extract Text and Basic File Info
+    const { text: messageText, fileId, telegramMimeType, fileName, initialParts } = await extractMessageData(ctx);
+    currentUserMessageParts.push(...initialParts);
+
+    // 2. Process Media File if present
+    if (fileId) {
+        const fileProcessingResult = await processMediaFile(fileId, telegramMimeType, fileName, ctx.session.model);
+        if (fileProcessingResult.part) {
+            currentUserMessageParts.push(fileProcessingResult.part);
+        }
+        if (!fileProcessingResult.success) {
+            console.warn(`MESSAGE_HANDLER: File processing failed for ${fileId}. Error: ${fileProcessingResult.error}`);
+            // If there's no text part already, and file processing failed,
+            // we might not want to call Gemini if only an error message part exists.
+            // However, current logic adds the error message as a part, so Gemini will see it.
+        }
+    }
 
     // 3. Final check for parts to send to Gemini.
-    // If after processing text and file, `currentUserMessageParts` is empty, it means
-    // the message type was unhandled (e.g., location, contact, poll).
     if (currentUserMessageParts.length === 0) {
         console.warn("GEMINI_CALL_SKIPPED: Current message parts are empty after processing.");
-        // Reply to the user if the message type wasn't handled at all.
         if (!ctx.message.text && !ctx.message.caption && !fileId) {
             console.log(`MESSAGE_HANDLER: Received completely unhandled message type. ctx.message:`, ctx.message);
             ctx.reply('Извините, я пока умею обрабатывать для ответа через Gemini только текст, фото, видео, документы (включая PDF), голосовые сообщения, видео-сообщения, аудио, анимации и стикеры (при условии поддержки выбранной моделью).');
@@ -723,11 +735,8 @@ bot.on('message', async (ctx) => {
         return; // Stop processing if no valid parts to send.
     }
 
-    // 4. Construct the full `contents` array for the Gemini API request.
-    // The `contents` array represents the conversation history + the current user turn,
-    // in chronological order (oldest first).
     const contents = [
-        ...ctx.session.history, // Add historical turns first.
+        ...ctx.session.history,
         { role: 'user', parts: currentUserMessageParts } // Add the current user turn last.
     ];
 
@@ -844,9 +853,8 @@ bot.on('message', async (ctx) => {
         }
 
         // Keep history length manageable (e.g., last 10 back-and-forth turns = 20 messages).
-        const maxHistoryMessages = 20;
-        if (ctx.session.history.length > maxHistoryMessages) {
-            ctx.session.history = ctx.session.history.slice(-maxHistoryMessages); // Remove older messages.
+        if (ctx.session.history.length > MAX_HISTORY_MESSAGES) {
+            ctx.session.history = ctx.session.history.slice(-MAX_HISTORY_MESSAGES); // Remove older messages.
         }
         console.log(`HISTORY_STATE: Current history size: ${ctx.session.history.length}`);
 
@@ -869,9 +877,8 @@ bot.on('message', async (ctx) => {
         if (currentUserMessageParts.length > 0) {
             ctx.session.history.push({ role: 'user', parts: currentUserMessageParts });
             // Ensure history length is managed even on error.
-            const maxHistoryMessages = 20;
-            if (ctx.session.history.length > maxHistoryMessages) {
-                ctx.session.history = ctx.session.history.slice(-maxHistoryMessages);
+            if (ctx.session.history.length > MAX_HISTORY_MESSAGES) {
+                ctx.session.history = ctx.session.history.slice(-MAX_HISTORY_MESSAGES);
             }
         }
         console.log(`HISTORY_STATE: History size after error: ${ctx.session.history.length}`);
