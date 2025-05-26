@@ -156,10 +156,14 @@ function detectMimeType(buffer, fileName = '') {
     // Video formats (common signatures/extensions)
     if (signature.includes('66747970') || ext === 'mp4') return 'video/mp4'; // ftyp is often part of MP4/MOV headers
     if (signature.startsWith('1A45DFA3') || ext === 'webm') return 'video/webm'; // EBML signature for WebM
-    if (signature.startsWith('464C5601') || ext === 'flv') return 'video/x-flv';
+    if (signature.startsWith('464C5601') || ext === 'flv') return 'video/x-flv'; // FLV
     if (ext === 'avi') return 'video/x-msvideo';
     if (ext === 'mov' || ext === 'qt') return 'video/quicktime';
     if (ext === 'mkv') return 'video/x-matroska';
+    if (ext === 'mpeg' || ext === 'mpg') return 'video/mpeg';
+    if (ext === 'wmv') return 'video/x-ms-wmv';
+    if (ext === '3gp' || ext === '3gpp') return 'video/3gpp';
+
 
     // Audio formats (common signatures/extensions)
     if (signature.startsWith('494433') || signature.startsWith('FFFB') || signature.startsWith('FFF3') || ext === 'mp3') return 'audio/mpeg'; // ID3 tag for MP3, FFFB/FFF3 for MP3 frames
@@ -201,6 +205,23 @@ function detectMimeType(buffer, fileName = '') {
     return 'application/octet-stream';
 }
 
+/**
+ * Detects a YouTube URL in a given text.
+ * @param {string} text - The text to search for a YouTube URL.
+ * @returns {string|null} The first YouTube URL found, or null.
+ */
+function detectYoutubeUrl(text) {
+    if (!text) return null;
+    // Regex to find YouTube URLs (watch, short links, embed, etc.)
+    const youtubeRegex = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/gi;
+    const match = youtubeRegex.exec(text);
+    if (match && match[0]) { // match[0] is the full URL
+        // Ensure it's a full, valid-looking URL.
+        // The regex already captures common forms.
+        return match[0];
+    }
+    return null;
+}
 
 // --- Helper Functions for File Handling (continued) ---
 
@@ -401,7 +422,8 @@ bot.command('supportedformats', (ctx) => {
         '🎥 **Видео**: MP4, WebM, AVI, MOV, MKV, FLV (через File API)\n' +
         '🎵 **Аудио**: MP3, OGG, WAV, FLAC, AAC, M4A (через File API)\n' +
         '📄 **Документы**: PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX (через File API)\n' +
-        '📝 **Текст**: TXT, HTML, CSS, JS, JSON, XML (через File API)\n' +
+        '📝 **Текст (файлы)**: TXT, HTML, CSS, JS, JSON, XML (через File API)\n' +
+        '🔗 **YouTube URL**: Просто вставьте ссылку на YouTube видео в сообщение.\n' +
         '📦 **Архивы**: ZIP, 7Z, RAR, GZ (модель может попытаться извлечь текст)\n' +
         '💬 **Голосовые сообщения Telegram**: OGG (через File API)\n' +
         '🎭 **Стикеры Telegram**: WebP (через inline_data или File API, если анимированы)\n\n' +
@@ -495,19 +517,31 @@ bot.on('message', async (ctx) => {
         return;
     }
 
-    let messageText = null;             // Stores text content from the message (either text or caption).
-    const currentUserMessageParts = []; // Array to build the 'parts' for the current user turn for Gemini API.
+    let messageText = null; // Stores text content from the message (either text or caption).
+    let textPart = null;    // Part for Gemini API: { text: "..." }
+    let filePart = null;    // Part for Gemini API: { fileData: { ... } } or { inline_data: { ... } }
 
     // 1. Extract Text Content (from message.text or message.caption).
     if (ctx.message.text) {
         messageText = ctx.message.text;
-        currentUserMessageParts.push({ text: messageText });
         console.log(`MESSAGE_HANDLER: Received text message from ${ctx.from.id}: "${messageText}"`);
     } else if (ctx.message.caption) {
         // This is a media message with a text caption.
         messageText = ctx.message.caption;
-        currentUserMessageParts.push({ text: messageText });
         console.log(`MESSAGE_HANDLER: Received media with caption from ${ctx.from.id}: "${messageText}"`);
+    }
+
+    if (messageText) {
+        textPart = { text: messageText };
+    }
+
+    // 2. Check for YouTube URL in the message text.
+    // If a YouTube URL is found, it will be prioritized as the file input.
+    const youtubeUrl = detectYoutubeUrl(messageText);
+    if (youtubeUrl) {
+        console.log(`MESSAGE_HANDLER: Detected YouTube URL: ${youtubeUrl}`);
+        filePart = { fileData: { fileUri: youtubeUrl } };
+        // Note: mimeType is not required for YouTube fileUri per Gemini docs.
     }
 
     // 2. Handle Media Files (photos, videos, documents, voice notes, video notes, audio, animations, stickers).
@@ -516,96 +550,320 @@ bot.on('message', async (ctx) => {
     let fileName = null;                // Suggested file name for upload.
     let fileBuffer = null;              // Buffer to hold file data for MIME detection and upload.
 
-    // Determine fileId, original mimeType (from Telegram), and fileName based on the specific message type.
-    if (ctx.message.photo) {
-        fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-        telegramProvidedMimeType = 'image/jpeg'; // Telegram often converts photos to JPEG.
-        fileName = `${fileId}.jpg`;
-        console.log(`MESSAGE_HANDLER: Received photo (file_id: ${fileId})`);
-    } else if (ctx.message.video) {
-        fileId = ctx.message.video.file_id;
-        telegramProvidedMimeType = ctx.message.video.mime_type || 'video/mp4';
-        fileName = ctx.message.video.file_name || `${fileId}.mp4`;
-        console.log(`MESSAGE_HANDLER: Received video (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
-    } else if (ctx.message.document) {
-        fileId = ctx.message.document.file_id;
-        telegramProvidedMimeType = ctx.message.document.mime_type || 'application/octet-stream';
-        fileName = ctx.message.document.file_name || `${fileId}.dat`;
-        console.log(`MESSAGE_HANDLER: Received document (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType}, file_name: ${fileName})`);
-    } else if (ctx.message.voice) {
-        fileId = ctx.message.voice.file_id;
-        telegramProvidedMimeType = ctx.message.voice.mime_type || 'audio/ogg';
-        fileName = `${fileId}.ogg`;
-        console.log(`MESSAGE_HANDLER: Received voice message (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
-    } else if (ctx.message.video_note) {
-        fileId = ctx.message.video_note.file_id;
-        telegramProvidedMimeType = ctx.message.video_note.mime_type || 'video/mp4';
-        fileName = `${fileId}.mp4`;
-        console.log(`MESSAGE_HANDLER: Received video note (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
-    } else if (ctx.message.audio) { // NEW: Audio file handling
-        fileId = ctx.message.audio.file_id;
-        telegramProvidedMimeType = ctx.message.audio.mime_type || 'audio/mpeg'; // Common audio MIME type
-        fileName = ctx.message.audio.file_name || `${fileId}.mp3`;
-        console.log(`MESSAGE_HANDLER: Received audio (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType}, file_name: ${fileName})`);
-    } else if (ctx.message.animation) { // NEW: Animation file handling
-        fileId = ctx.message.animation.file_id;
-        telegramProvidedMimeType = ctx.message.animation.mime_type || 'video/mp4'; // Animations can be MP4/GIF
-        fileName = ctx.message.animation.file_name || `${fileId}.mp4`;
-        console.log(`MESSAGE_HANDLER: Received animation (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType}, file_name: ${fileName})`);
-    } else if (ctx.message.sticker) { // NEW: Sticker handling (often WebP)
-        // Note: Stickers are typically WebP or animated. For static stickers, can be inline.
-        // Animated stickers often require File API.
-        fileId = ctx.message.sticker.file_id;
-        telegramProvidedMimeType = ctx.message.sticker.mime_type || 'image/webp'; // Stickers are often WebP
-        fileName = `${fileId}.webp`; // Assume WebP for sticker
-        console.log(`MESSAGE_HANDLER: Received sticker (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
-        if (ctx.message.sticker.is_animated || ctx.message.sticker.is_video) {
-            console.log(`MESSAGE_HANDLER: Animated/Video sticker detected.`);
-            // These might be better handled by File API for models that support video/animation.
+    // Only process Telegram attached files if no YouTube URL was found in the text.
+    if (!filePart) {
+        // Determine fileId, original mimeType (from Telegram), and fileName based on the specific message type.
+        if (ctx.message.photo) {
+            fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+            telegramProvidedMimeType = 'image/jpeg'; // Telegram often converts photos to JPEG.
+            fileName = `${fileId}.jpg`;
+            console.log(`MESSAGE_HANDLER: Received photo (file_id: ${fileId})`);
+        } else if (ctx.message.video) {
+            fileId = ctx.message.video.file_id;
+            telegramProvidedMimeType = ctx.message.video.mime_type || 'video/mp4';
+            fileName = ctx.message.video.file_name || `${fileId}.mp4`;
+            console.log(`MESSAGE_HANDLER: Received video (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
+        } else if (ctx.message.document) {
+            fileId = ctx.message.document.file_id;
+            telegramProvidedMimeType = ctx.message.document.mime_type || 'application/octet-stream';
+            fileName = ctx.message.document.file_name || `${fileId}.dat`;
+            console.log(`MESSAGE_HANDLER: Received document (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType}, file_name: ${fileName})`);
+        } else if (ctx.message.voice) {
+            fileId = ctx.message.voice.file_id;
+            telegramProvidedMimeType = ctx.message.voice.mime_type || 'audio/ogg';
+            fileName = `${fileId}.ogg`;
+            console.log(`MESSAGE_HANDLER: Received voice message (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
+        } else if (ctx.message.video_note) {
+            fileId = ctx.message.video_note.file_id;
+            telegramProvidedMimeType = ctx.message.video_note.mime_type || 'video/mp4';
+            fileName = `${fileId}.mp4`;
+            console.log(`MESSAGE_HANDLER: Received video note (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
+        } else if (ctx.message.audio) {
+            fileId = ctx.message.audio.file_id;
+            telegramProvidedMimeType = ctx.message.audio.mime_type || 'audio/mpeg';
+            fileName = ctx.message.audio.file_name || `${fileId}.mp3`;
+            console.log(`MESSAGE_HANDLER: Received audio (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType}, file_name: ${fileName})`);
+        } else if (ctx.message.animation) {
+            fileId = ctx.message.animation.file_id;
+            telegramProvidedMimeType = ctx.message.animation.mime_type || 'video/mp4';
+            fileName = ctx.message.animation.file_name || `${fileId}.mp4`;
+            console.log(`MESSAGE_HANDLER: Received animation (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType}, file_name: ${fileName})`);
+        } else if (ctx.message.sticker) {
+            fileId = ctx.message.sticker.file_id;
+            telegramProvidedMimeType = ctx.message.sticker.mime_type || 'image/webp';
+            fileName = `${fileId}.webp`;
+            console.log(`MESSAGE_HANDLER: Received sticker (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
+            if (ctx.message.sticker.is_animated || ctx.message.sticker.is_video) {
+                console.log(`MESSAGE_HANDLER: Animated/Video sticker detected.`);
+            }
+        }
+
+        // If a file ID was found from Telegram, proceed to download and process it.
+        if (fileId) {
+            fileBuffer = await downloadFileBuffer(fileId);
+
+            if (!fileBuffer) {
+                console.warn(`FILE_PROCESSING_WARNING: Failed to download file buffer for ${fileId}. Skipping processing.`);
+                // Add error message to textPart or create a new one if textPart is null
+                const errorText = `[Не удалось скачать файл из Telegram.]`;
+                textPart = textPart ? { text: `${textPart.text}\n${errorText}` } : { text: errorText };
+            } else {
+                const detectedMimeType = detectMimeType(fileBuffer, fileName || 'unknown_file');
+                console.log(`FILE_PROCESSING_INFO: Telegram-provided MIME: '${telegramProvidedMimeType}', Detected MIME by custom function: '${detectedMimeType}', Filename: '${fileName || 'N/A'}'`);
+                let effectiveMimeType = detectedMimeType;
+
+                if (detectedMimeType === 'application/octet-stream' && telegramProvidedMimeType && telegramProvidedMimeType !== 'application/octet-stream') {
+                    console.warn(`FILE_PROCESSING_CONSIDERATION: Custom detection yielded 'application/octet-stream', while Telegram suggested '${telegramProvidedMimeType}'. Using detected type. If issues arise for '${fileName}', review 'detectMimeType'.`);
+                }
+
+                const currentModel = ctx.session.model;
+                const strategy = getFileProcessingStrategy(effectiveMimeType, currentModel);
+                console.log(`DEBUG_FILE_STRATEGY: Model: '${currentModel}', Effective MIME: '${effectiveMimeType}', Strategy: ${JSON.stringify(strategy)}`);
+
+                if (strategy.canProcess) {
+                    if (strategy.useInlineData) { // Typically for images
+                        console.log(`FILE_PROCESSING_ACTION: Using inline_data for file ${fileId} (MIME: ${effectiveMimeType}).`);
+                        try {
+                            const base64Data = fileBuffer.toString('base64');
+                            filePart = {
+                                inline_data: {
+                                    mime_type: effectiveMimeType,
+                                    data: base64Data
+                                    // videoMetadata could be added here if/when supported for inline images/short videos
+                                }
+                            };
+                            console.log(`FILE_PROCESSING_SUCCESS: Added inline_data part for ${fileId}.`);
+                        } catch (error) {
+                            console.error(`FILE_PROCESSING_ERROR: Failed to convert file ${fileId} to Base64 for inline_data:`, error);
+                            const errorText = `[Ошибка при обработке файла (${effectiveMimeType}) как встроенного изображения.]`;
+                            textPart = textPart ? { text: `${textPart.text}\n${errorText}` } : { text: errorText };
+                        }
+                    } else if (strategy.useFileAPI) { // For PDFs, videos, audio, larger files from Telegram
+                        console.log(`FILE_PROCESSING_ACTION: Using File API for file ${fileId} (MIME: ${effectiveMimeType}, Name: '${fileName}').`);
+                        const uploadDisplayName = fileName || `file_${fileId}_${Date.now()}`;
+                        const uploadedFileObject = await uploadFileToGemini(fileBuffer, effectiveMimeType, uploadDisplayName);
+
+                        if (uploadedFileObject && uploadedFileObject.name) {
+                            filePart = {
+                                fileData: {
+                                    mimeType: effectiveMimeType,
+                                    fileUri: uploadedFileObject.name
+                                    // videoMetadata: { startOffset, endOffset, fps } could be added here
+                                }
+                            };
+                            console.log(`FILE_PROCESSING_SUCCESS: Added fileData part (File URI: ${uploadedFileObject.name}) for ${fileId}.`);
+                        } else {
+                            console.warn(`FILE_PROCESSING_FAILURE: Failed to upload file ${fileId} (MIME: ${effectiveMimeType}) to Gemini File API.`);
+                            const errorText = `[Не удалось загрузить файл (${effectiveMimeType}) в Gemini File API.]`;
+                            textPart = textPart ? { text: `${textPart.text}\n${errorText}` } : { text: errorText };
+                        }
+                    } else {
+                        console.warn(`FILE_PROCESSING_WARNING: File type '${effectiveMimeType}' was processable by strategy, but no specific method (inline/FileAPI) was selected. Review getFileProcessingStrategy.`);
+                        const errorText = `[Внутренняя ошибка: не удалось определить метод обработки для файла типа ${effectiveMimeType}.]`;
+                        textPart = textPart ? { text: `${textPart.text}\n${errorText}` } : { text: errorText };
+                    }
+                } else {
+                    console.warn(`FILE_PROCESSING_UNSUPPORTED: File type '${effectiveMimeType}' (detected) / '${telegramProvidedMimeType}' (Telegram) for file '${fileName}' is not supported for processing with model '${currentModel}'. Strategy recommendation: ${strategy.recommendation}`);
+                    let userMessage = `[Файл типа ${effectiveMimeType} не поддерживается выбранной моделью (${currentModel}).]`;
+                    if (!strategy.isSupported) {
+                        userMessage = `[Файл типа ${effectiveMimeType} не поддерживается этим ботом.]`;
+                    } else if (strategy.recommendation === 'upgrade_model') {
+                        userMessage += ` Попробуйте выбрать более мощную модель (например, 'pro2.5', 'flash2.5') через команду /setmodel.`;
+                    }
+                    textPart = textPart ? { text: `${textPart.text}\n${userMessage}` } : { text: userMessage };
+                }
+            }
+        }
+    } // End of Telegram file processing block (if !filePart from YouTube)
+
+    // 3. Construct currentUserMessageParts with file part first, then text part.
+    const currentUserMessageParts = [];
+    if (filePart) {
+        currentUserMessageParts.push(filePart);
+    }
+    if (textPart) {
+        currentUserMessageParts.push(textPart);
+    }
+
+    // 4. Final check for parts to send to Gemini.
+    if (currentUserMessageParts.length === 0) {
+        console.warn("GEMINI_CALL_SKIPPED: Current message parts are empty after processing.");
+        if (!ctx.message.text && !ctx.message.caption && !fileId && !youtubeUrl) { // Check if it was truly an unhandled type
+            console.log(`MESSAGE_HANDLER: Received completely unhandled message type. ctx.message:`, ctx.message);
+            ctx.reply('Извините, я пока умею обрабатывать для ответа через Gemini только текст, фото, видео (включая ссылки YouTube), документы (включая PDF), голосовые сообщения, видео-сообщения, аудио, анимации и стикеры (при условии поддержки выбранной моделью).');
+        } else {
+            // This case implies an error occurred during processing, and the error message should be in textPart.
+            // If textPart is still null here, it's an unexpected state.
+            ctx.reply(textPart ? textPart.text : 'Извините, возникла проблема с обработкой вашего сообщения.');
+        }
+        return;
+    }
+
+    // 5. Construct the full `contents` array for the Gemini API request.
+    const contents = [
+        ...ctx.session.history,
+        { role: 'user', parts: currentUserMessageParts }
+    ];
+
+    // 6. Prepare tools based on user settings.
+    const tools = [];
+    if (ctx.session.tools.googleSearch) {
+        tools.push({ googleSearch: {} });
+        console.log('TOOLS: Google Search tool enabled for this call.');
+    }
+    if (ctx.session.tools.urlContext) {
+        console.warn('TOOLS_WARNING: URL Context tool is enabled but might not be supported by the model or via standard tools configuration for API call.');
+    }
+
+    // 7. Call the Gemini API.
+    let thinkingMessageId = null;
+    if (ctx.session.talkMode) {
+        try {
+            const thinkingMsg = await ctx.reply('Думаю...');
+            thinkingMessageId = thinkingMsg.message_id;
+        } catch (error) {
+            console.error('TELEGRAM_ERROR: Failed to send "Thinking..." message:', error);
         }
     }
 
-    // If a file ID was found, proceed to download and process it for Gemini.
-    if (fileId) {
-        // Download the file buffer once for MIME detection and subsequent upload.
-        fileBuffer = await downloadFileBuffer(fileId); // fileBuffer is already declared
+    let geminiResponseText = 'Не удалось получить ответ от Gemini.';
+    let inputTokens = 0;
+    let outputTokens = 0;
 
-        if (!fileBuffer) {
-            console.warn(`FILE_PROCESSING_WARNING: Failed to download file buffer for ${fileId}. Skipping processing.`);
-            currentUserMessageParts.push({ text: `[Не удалось скачать файл из Telegram.]` });
+    try {
+        const model = genAI.getGenerativeModel({ model: ctx.session.model });
+        const systemInstructionContent = ctx.session.systemInstruction
+            ? { parts: [{ text: ctx.session.systemInstruction }] }
+            : undefined;
+
+        console.log('GEMINI_API_CALL: Calling generateContent with contents:', JSON.stringify(contents));
+        console.log('GEMINI_API_CALL: Using system instruction:', systemInstructionContent ? systemInstructionContent.parts[0].text : 'None');
+        console.log('GEMINI_API_CALL: Using tools:', tools.length > 0 ? JSON.stringify(tools) : 'None');
+
+        const result = await model.generateContent({
+            contents: contents,
+            tools: tools.length > 0 ? tools : undefined,
+            systemInstruction: systemInstructionContent,
+            /* safetySettings: [ ... ] */ // Temporarily removed for brevity, re-add as needed
+            generationConfig: {}
+        });
+
+        const response = result.response;
+
+        if (response && response.candidates && response.candidates.length > 0 && response.candidates[0].content && response.candidates[0].content.parts && response.candidates[0].content.parts.length > 0) {
+            geminiResponseText = response.candidates[0].content.parts
+                .map(part => part.text)
+                .filter(text => text !== undefined && text !== null)
+                .join('');
         } else {
-            // File buffer is available. Proceed with MIME detection and processing.
-            // Use the custom detectMimeType function as the primary source for MIME type.
-            // fileName (derived earlier) is used as a hint for detectMimeType if needed.
-            const detectedMimeType = detectMimeType(fileBuffer, fileName || 'unknown_file');
-            
-            console.log(`FILE_PROCESSING_INFO: Telegram-provided MIME: '${telegramProvidedMimeType}', Detected MIME by custom function: '${detectedMimeType}', Filename: '${fileName || 'N/A'}'`);
+            console.warn("GEMINI_RESPONSE_WARNING: Gemini response did not contain text parts.", response);
+            geminiResponseText = 'Не удалось получить текстовый ответ от Gemini.';
+        }
 
-            // The 'effectiveMimeType' is what we'll use for Gemini.
-            // Prioritize the detectedMimeType.
-            let effectiveMimeType = detectedMimeType;
-
-            // Sanity check: if detection results in octet-stream but Telegram provided something more specific,
-            // it *might* indicate a need to refine detectMimeType for that case.
-            // However, we generally trust our buffer-based detection more.
-            if (detectedMimeType === 'application/octet-stream' && 
-                telegramProvidedMimeType && 
-                telegramProvidedMimeType !== 'application/octet-stream') {
-                console.warn(`FILE_PROCESSING_CONSIDERATION: Custom detection yielded 'application/octet-stream', while Telegram suggested '${telegramProvidedMimeType}'. Using detected type. If issues arise for '${fileName}', review 'detectMimeType'.`);
+        if (response.usageMetadata) {
+            inputTokens = response.usageMetadata.promptTokenCount || 0;
+            outputTokens = response.usageMetadata.candidatesTokenCount || 0;
+            const totalTokensForCall = response.usageMetadata.totalTokenCount || 0;
+            console.log(`TOKEN_USAGE: Gemini API Usage Metadata: Input=${inputTokens}, Output=${outputTokens}, Total=${totalTokensForCall}`);
+            ctx.session.totalTokens += totalTokensForCall;
+        } else {
+            try {
+                const tokenEstimation = await model.countTokens({
+                    contents: contents,
+                    tools: tools.length > 0 ? tools : undefined,
+                    systemInstruction: systemInstructionContent,
+                });
+                inputTokens = tokenEstimation.totalTokens || 0;
+                ctx.session.totalTokens += inputTokens;
+                console.log(`TOKEN_USAGE: Estimated Input tokens for this call (from countTokens): ${inputTokens}. Total cumulative (estimated, input-biased): ${ctx.session.totalTokens}`);
+            } catch (tokenError) {
+                console.error('TOKEN_COUNT_ERROR: Failed to count tokens after successful response:', tokenError);
             }
+        }
 
-            const currentModel = ctx.session.model;
-            const strategy = getFileProcessingStrategy(effectiveMimeType, currentModel);
+        ctx.session.history.push({ role: 'user', parts: currentUserMessageParts });
+        if (geminiResponseText && geminiResponseText.trim().length > 0) {
+            ctx.session.history.push({ role: 'model', parts: [{ text: geminiResponseText }] });
+        } else {
+            console.warn("HISTORY_UPDATE_WARNING: Gemini response text was empty. Adding empty model turn to history.");
+            ctx.session.history.push({ role: 'model', parts: [{ text: '' }] });
+        }
 
-            console.log(`DEBUG_FILE_STRATEGY: Model: '${currentModel}', Effective MIME: '${effectiveMimeType}', Strategy: ${JSON.stringify(strategy)}`);
+        const maxHistoryMessages = 20;
+        if (ctx.session.history.length > maxHistoryMessages) {
+            ctx.session.history = ctx.session.history.slice(-maxHistoryMessages);
+        }
+        console.log(`HISTORY_STATE: Current history size: ${ctx.session.history.length}`);
 
-            if (strategy.canProcess) {
-                if (strategy.useInlineData) { // Typically for images
-                    console.log(`FILE_PROCESSING_ACTION: Using inline_data for file ${fileId} (MIME: ${effectiveMimeType}).`);
-                    try {
-                        const base64Data = fileBuffer.toString('base64');
-                        currentUserMessageParts.push({
-                            inline_data: {
+    } catch (error) {
+        console.error('GEMINI_API_ERROR: Error calling Gemini API:', error);
+        geminiResponseText = 'Произошла ошибка при обращении к Gemini API.';
+
+        if (error.response && error.response.data) {
+            console.error('GEMINI_API_ERROR_RESPONSE:', error.response.data);
+            if (error.response.data.error && error.response.data.error.message) {
+                geminiResponseText += ` Ошибка API: ${error.response.data.error.message}`;
+            }
+        } else if (error.message) {
+            geminiResponseText += ` Ошибка: ${error.message}`;
+        }
+
+        if (currentUserMessageParts.length > 0) {
+            ctx.session.history.push({ role: 'user', parts: currentUserMessageParts });
+            const maxHistoryMessages = 20;
+            if (ctx.session.history.length > maxHistoryMessages) {
+                ctx.session.history = ctx.session.history.slice(-maxHistoryMessages);
+            }
+        }
+        console.log(`HISTORY_STATE: History size after error: ${ctx.session.history.length}`);
+
+    } finally {
+        if (thinkingMessageId) {
+            try {
+                await ctx.deleteMessage(thinkingMessageId);
+                console.log(`TELEGRAM_ACTION: Deleted "Thinking..." message ${thinkingMessageId}`);
+            } catch (deleteError) {
+                console.error(`TELEGRAM_ERROR: Failed to delete "Thinking..." message ${thinkingMessageId}:`, deleteError);
+            }
+        }
+    }
+
+    // 10. Send the final response back to Telegram.
+    try {
+        if (!geminiResponseText || geminiResponseText.trim().length === 0) {
+            console.warn("TELEGRAM_REPLY: Final Gemini response text was empty, sending a default message.");
+            if (!geminiResponseText.startsWith('Произошла ошибка')) { // Avoid duplicating error prefix
+                await ctx.reply("Не удалось сгенерировать ответ. Попробуйте еще раз или измените запрос/настройки.");
+            } else {
+                await ctx.reply(geminiResponseText);
+            }
+        } else {
+            await ctx.reply(geminiResponseText);
+        }
+    } catch (replyError) {
+        console.error('TELEGRAM_REPLY_ERROR: Failed to send final reply to Telegram:', replyError);
+    }
+});
+
+// --- Webhook Configuration for Express ---
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(express.json());
+app.use(bot.webhookCallback('/webhook'));
+
+app.get('/', (req, res) => {
+    res.send('Telegram Bot server is running and waiting for webhooks at /webhook. Gemini integration enabled.');
+});
+
+// --- Server Startup ---
+app.listen(port, () => {
+    console.log(`SERVER_START: Server running on port ${port}`);
+    console.log(`SERVER_START: Webhook endpoint configured at /webhook`);
+    console.log(`SERVER_START: Telegram Bot Token loaded.`);
+    console.log(`SERVER_START: Gemini API Key loaded.`);
+    console.log('SERVER_START: Awaiting incoming webhooks from Telegram...');
+});
                                 mime_type: effectiveMimeType, // Gemini expects snake_case for inline_data parts
                                 data: base64Data
                             }
