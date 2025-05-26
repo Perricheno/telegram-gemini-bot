@@ -3,16 +3,16 @@
 /**
  * Telegram Bot with focused Gemini AI Integration.
  *
- * This bot handles various message types (text, photos, videos, documents, voice notes, video notes)
+ * This bot handles various message types (text, photos, videos, documents, voice notes, video notes, audio, animations)
  * and processes them using Google's selected Gemini models via the Generative AI API.
- * It leverages Gemini's File API for larger multimedia content (PDFs, videos, audio).
+ * It leverages Gemini's File API for larger multimedia content (PDFs, videos, audio, animations).
  *
  * Selected Models: gemini-2.5-flash, gemini-2.0-flash, gemini-2.5-pro.
  * These models are optimized for multimodal understanding.
  *
  * Features:
  * - Text and comprehensive multimodal input processing (images via inline_data,
- *   PDFs, videos, voice notes, video notes via Gemini File API).
+ *   PDFs, videos, audio, voice notes, video notes, animations via Gemini File API).
  * - Conversation history management.
  * - Restricted and customizable Gemini model selection.
  * - System instructions for guiding AI behavior.
@@ -242,7 +242,7 @@ async function deleteGeminiFile(fileUri) {
 
 // /start command: Welcomes the user and provides a list of available commands.
 bot.start((ctx) => {
-    ctx.reply('Привет! Я Telegram бот с интеграцией Gemini. Отправь мне текст или поддерживаемый файл (фото, PDF, видео, аудио) с текстом или без, и я отвечу. Используй команды для настройки:\n' +
+    ctx.reply('Привет! Я Telegram бот с интеграцией Gemini. Отправь мне текст или поддерживаемый файл (фото, PDF, видео, аудио, видео-сообщение, анимацию) с текстом или без, и я отвечу. Используй команды для настройки:\n' +
               '/newchat - начать новый чат\n' +
               '/setsysteminstruction <текст> - задать системные инструкции\n' +
               '/toggletalkmode - включить/выключить "режим мышления"\n' +
@@ -372,7 +372,7 @@ bot.on('message', async (ctx) => {
         console.log(`MESSAGE_HANDLER: Received media with caption from ${ctx.from.id}: "${messageText}"`);
     }
 
-    // 2. Handle Media Files (photos, videos, documents, voice notes, video notes).
+    // 2. Handle Media Files (photos, videos, documents, voice notes, video notes, audio, animations).
     let fileId = null;                  // Telegram file_id.
     let telegramProvidedMimeType = null; // MIME type reported by Telegram.
     let fileName = null;                // Suggested file name for upload.
@@ -404,8 +404,18 @@ bot.on('message', async (ctx) => {
         telegramProvidedMimeType = ctx.message.video_note.mime_type || 'video/mp4'; // Video notes are typically mp4.
         fileName = `${fileId}.mp4`;
         console.log(`MESSAGE_HANDLER: Received video note (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
+    } else if (ctx.message.animation) { // ADDED: Handle animation files
+        fileId = ctx.message.animation.file_id;
+        telegramProvidedMimeType = ctx.message.animation.mime_type || 'video/mp4'; // Animations can be GIF/MP4.
+        fileName = ctx.message.animation.file_name || `${fileId}.gif`; // Use .gif as a common animation extension.
+        console.log(`MESSAGE_HANDLER: Received animation (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
+    } else if (ctx.message.audio) { // ADDED: Handle audio files (non-voice)
+        fileId = ctx.message.audio.file_id;
+        telegramProvidedMimeType = ctx.message.audio.mime_type || 'audio/mpeg'; // Audio can be MP3/M4A.
+        fileName = ctx.message.audio.file_name || `${fileId}.mp3`; // Use .mp3 as a common audio extension.
+        console.log(`MESSAGE_HANDLER: Received audio (file_id: ${fileId}, mime_type: ${telegramProvidedMimeType})`);
     }
-    // TODO: Extend this logic to support other media types like audio (not voice), animation, or stickers if needed.
+    // TODO: Extend this logic to support other media types like stickers if needed (if Gemini supports them).
 
     // If a file ID was found, proceed to download and process it for Gemini.
     if (fileId) {
@@ -417,19 +427,21 @@ bot.on('message', async (ctx) => {
         const isImage = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('image/');
         const isVideo = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('video/');
         const isAudio = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('audio/');
+        const isAnimation = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('video/') && (telegramProvidedMimeType.includes('gif') || ctx.message.animation); // Explicitly check animation type
 
         // --- DEBUGGING LOGS FOR FILE PROCESSING DECISION ---
         console.log(`DEBUG_FILE_LOGIC: currentModel: "${currentModel}"`);
         console.log(`DEBUG_FILE_LOGIC: telegramProvidedMimeType: "${telegramProvidedMimeType}"`);
-        console.log(`DEBUG_FILE_LOGIC: isPdf: ${isPdf}, isImage: ${isImage}, isVideo: ${isVideo}, isAudio: ${isAudio}`);
+        console.log(`DEBUG_FILE_LOGIC: isPdf: ${isPdf}, isImage: ${isImage}, isVideo: ${isVideo}, isAudio: ${isAudio}, isAnimation: ${isAnimation}`);
         console.log(`DEBUG_FILE_LOGIC: isCapableModel (from CAPABLE_FILE_MODELS): ${isCapableModel}`);
         // --- END DEBUGGING LOGS ---
 
         // Decide whether to use `inline_data` (Base64) or Gemini's File API.
         // `inline_data` is typically for smaller images.
         const shouldUseInlineData = isImage;
-        // File API is used for larger files (PDFs, videos, audio) and requires supported models.
-        const shouldUseFileAPI = isCapableModel && (isPdf || isVideo || isAudio || (isImage && !shouldUseInlineData));
+        // File API is used for larger files (PDFs, videos, audio, animations) and requires supported models.
+        // Updated `shouldUseFileAPI` to include `isAnimation`
+        const shouldUseFileAPI = isCapableModel && (isPdf || isVideo || isAudio || isAnimation || (isImage && !shouldUseInlineData)); 
 
         console.log(`DEBUG_FILE_LOGIC: shouldUseInlineData: ${shouldUseInlineData}`);
         console.log(`DEBUG_FILE_LOGIC: shouldUseFileAPI: ${shouldUseFileAPI}`);
@@ -497,7 +509,8 @@ bot.on('message', async (ctx) => {
         // Reply to the user if the message type wasn't handled at all.
         if (!ctx.message.text && !ctx.message.caption && !fileId) {
             console.log(`MESSAGE_HANDLER: Received completely unhandled message type. ctx.message:`, ctx.message);
-            ctx.reply('Извините, я пока умею обрабатывать для ответа через Gemini только текст, фото, видео, документы (включая PDF), голосовые сообщения и видео-сообщения (с текстом или без), при условии поддержки выбранной моделью.');
+            // Updated message to reflect new capabilities.
+            ctx.reply('Извините, я пока умею обрабатывать для ответа через Gemini только текст, фото, видео, документы (включая PDF), аудио, голосовые сообщения, видео-сообщения и анимации (с текстом или без), при условии поддержки выбранной моделью.');
         } else {
             // This case should ideally not be reached if fileId was processed,
             // but as a fallback for other processing failures.
