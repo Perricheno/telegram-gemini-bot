@@ -316,14 +316,14 @@ bot.command('setmodel', (ctx) => {
         ctx.session.model = AVAILABLE_MODELS[alias];
         let replyText = `Модель установлена на ${ctx.session.model}.`;
         // Provide warnings/info based on selected model's capabilities.
-        if (alias === 'image-gen-2.0') { // This model should ideally be removed if it's strictly image-only and not used for chat.
+        if (alias === 'image-gen-2.0') { 
             replyText += `\nВнимание: Эта модель предназначена ТОЛЬКО для генерации изображений и может не работать для диалога или обработки входящих медиа.`;
         } else if (alias.includes('preview')) {
             replyText += `\nВнимание: Это превью-модель, ее поведение может меняться.`;
         }
         // General warning if a less capable model is selected
-        if (!AVAILABLE_MODELS[alias].includes('pro-05-06') && !AVAILABLE_MODELS[alias].includes('flash-05-20')) {
-             replyText += `\nДля наилучшей поддержки мультимодальных данных (PDF, видео, аудио) рекомендуется использовать 'pro2.5' или 'flash2.5'.`;
+        if (!AVAILABLE_MODELS[alias].includes('pro-05-06') && !AVAILABLE_MODELS[alias].includes('flash-05-20') && !AVAILABLE_MODELS[alias].includes('flash-04-17')) {
+             replyText += `\nДля наилучшей поддержки мультимодальных данных (PDF, видео, аудио) рекомендуется использовать 'pro2.5', 'flash2.5' или '04-17'.`;
         }
 
         ctx.reply(replyText);
@@ -401,8 +401,9 @@ bot.on('message', async (ctx) => {
     // If a file ID was found, proceed to download and process it for Gemini.
     if (fileId) {
         const currentModel = ctx.session.model;
-        // Determine if the current model is one of the capable ones (Pro or 2.5 Flash).
-        const isCapableModel = currentModel.includes('pro-05-06') || currentModel.includes('flash-05-20') || currentModel.includes('flash-04-17');
+        // Determine if the current model is one of the capable ones (Pro or any 2.x Flash).
+        // **FIXED LOGIC**: Now includes gemini-2.0-flash and gemini-2.0-flash-lite in "capable" check.
+        const isCapableModel = currentModel.includes('pro-05-06') || currentModel.includes('flash-05-20') || currentModel.includes('flash-04-17') || currentModel.includes('2.0-flash');
 
         const isPdf = telegramProvidedMimeType === 'application/pdf';
         const isImage = telegramProvidedMimeType && telegramProvidedMimeType.startsWith('image/');
@@ -438,10 +439,10 @@ bot.on('message', async (ctx) => {
             }
         } else if (shouldUseFileAPI) {
             console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) using Gemini File API...`);
-            const fileBuffer = await downloadFileBuffer(fileId); // Download file as Buffer.
+            const fileBuffer = await downloadFileBuffer(fileId); // Скачиваем файл как буфер
 
             if (fileBuffer) {
-                const uploadedFile = await uploadFileToGemini(fileBuffer, telegramProvidedMimeType, fileName); // Upload to Gemini File API.
+                const uploadedFile = await uploadFileToGemini(fileBuffer, telegramProvidedMimeType, fileName); // Загружаем в Gemini File API
 
                 if (uploadedFile && uploadedFile.uri) {
                     // Add a `fileData` part, referencing the uploaded file's URI in Gemini.
@@ -543,13 +544,8 @@ bot.on('message', async (ctx) => {
             contents: contents, // Full conversation history + current user message.
             tools: tools.length > 0 ? tools : undefined, // Tools to enable for this generation.
             systemInstruction: systemInstructionContent, // Correct parameter for system instructions.
-            safetySettings: [ // Safety settings to control harmful content generation.
-                { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-                { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-                { category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold: HarmBlockThreshold.BLOCK_NONE },
-            ],
+            // **FIXED**: Removed all safetySettings temporarily to resolve 400 Bad Request error.
+            // safetySettings: [ ... ], // Re-introduce only standard categories after testing.
             generationConfig: {
                 // Future generation parameters (e.g., temperature, top_p) could be added here.
             }
