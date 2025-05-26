@@ -267,7 +267,7 @@ async function downloadFileAsBase64(fileId) {
 async function uploadFileToGemini(buffer, mimeType, fileName) {
     if (!buffer || !mimeType || !fileName) {
         console.error('FILE_UPLOAD_ERROR: Missing required parameters (buffer, mimeType, or fileName) for Gemini upload.');
-        return null;
+        return { success: false, error: 'missing_parameters', details: 'Buffer, mimeType, or fileName missing.' };
     }
     console.log(`GEMINI_FILE_UPLOAD: Starting upload for "${fileName}" (MIME: ${mimeType})...`);
     try {
@@ -297,13 +297,13 @@ async function uploadFileToGemini(buffer, mimeType, fileName) {
 
         if (file.state === 'ACTIVE') {
             console.log(`GEMINI_FILE_SUCCESS: File "${file.name}" is ACTIVE and ready. MIME: ${file.mimeType}.`);
-            return file; // Return the processed file object (contains 'name' and 'mimeType').
+            return { success: true, file: file }; // Return the processed file object
         } else if (file.state === 'FAILED') {
             console.error(`GEMINI_FILE_ERROR: File processing FAILED for "${file.name}". State: ${file.state}.`);
-            return null;
+            return { success: false, error: 'processing_failed', details: `File state: ${file.state}` };
         } else {
             console.warn(`GEMINI_FILE_WARNING: File "${file.name}" processing timed out or ended in unexpected state: ${file.state}.`);
-            return null;
+            return { success: false, error: 'processing_timeout_or_unexpected_state', details: `File state: ${file.state}` };
         }
 
     } catch (error) {
@@ -311,7 +311,7 @@ async function uploadFileToGemini(buffer, mimeType, fileName) {
         if (error.response && error.response.data) {
             console.error('GEMINI_API_ERROR_DETAILS:', error.response.data);
         }
-        return null;
+        return { success: false, error: 'upload_exception', details: error.message };
     }
 }
 
@@ -643,21 +643,23 @@ bot.on('message', async (ctx) => {
                     }
                 } else if (strategy.useFileAPI) {
                     console.log(`FILE_PROCESSING: Processing file ${fileId} (${telegramProvidedMimeType}) using Gemini File API...`);
-                    const uploadedFile = await uploadFileToGemini(fileBuffer, telegramProvidedMimeType, fileName); // Upload to Gemini File API
+                    const uploadResult = await uploadFileToGemini(fileBuffer, telegramProvidedMimeType, fileName); // Upload to Gemini File API
 
-                    // uploadedFile is the File object from Gemini, containing 'name' and 'mimeType'
-                    if (uploadedFile && uploadedFile.name && uploadedFile.mimeType) {
+                    if (uploadResult.success && uploadResult.file) {
+                        const geminiFile = uploadResult.file;
                         currentUserMessageParts.push({
                             fileData: {
-                                mime_type: uploadedFile.mimeType, // Use MIME type confirmed by Gemini.
-                                uri: uploadedFile.name            // Use the resource name (e.g., 'files/your-file-id').
+                                mime_type: geminiFile.mimeType, // Use MIME type confirmed by Gemini.
+                                uri: geminiFile.name            // Use the resource name (e.g., 'files/your-file-id').
                             }
                         });
-                        console.log(`FILE_PROCESSING: Added fileData part (Name: ${uploadedFile.name}, MIME: ${uploadedFile.mimeType}) to prompt parts.`);
-                        // TODO: Implement a strategy to delete files from File API (using uploadedFile.name) after use.
+                        console.log(`FILE_PROCESSING: Added fileData part (Name: ${geminiFile.name}, MIME: ${geminiFile.mimeType}) to prompt parts.`);
+                        // TODO: Implement a strategy to delete files from File API (using geminiFile.name) after use.
                     } else {
-                        console.warn(`FILE_PROCESSING_WARNING: Failed to upload file ${fileId} (${telegramProvidedMimeType}) to Gemini File API.`);
-                        currentUserMessageParts.push({ text: `[Не удалось загрузить файл (${telegramProvidedMimeType}) в Gemini File API.]` });
+                        const errorReason = uploadResult.error || 'unknown_error';
+                        const errorDetails = uploadResult.details || 'No additional details';
+                        console.warn(`FILE_PROCESSING_WARNING: Failed to upload/process file ${fileId} (${telegramProvidedMimeType}) for Gemini File API. Reason: ${errorReason}, Details: ${errorDetails}`);
+                        currentUserMessageParts.push({ text: `[Не удалось обработать файл (${telegramProvidedMimeType}) для Gemini File API. Причина: ${errorReason}.]` });
                     }
                 }
             } else {
